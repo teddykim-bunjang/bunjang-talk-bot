@@ -1,0 +1,14 @@
+{
+  "name": "bunjang-talk-bot",
+  "version": "1.0.0",
+  "description": "번개톡 발송 검토 자동화 봇",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@slack/bolt": "^3.17.0",
+    "dotenv": "^16.4.0",
+    "googleapis": "^140.0.0"
+  }
+}
