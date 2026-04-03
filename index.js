@@ -194,6 +194,7 @@ app.view('bt_modal', async ({ ack, body, view, client, logger }) => {
     slotResults.push({
       label,
       startHour,
+      startMin,
       count,
       result: slotResult,
       rejects: slotRejects,
@@ -248,6 +249,7 @@ app.view('bt_modal', async ({ ack, body, view, client, logger }) => {
       manualSlots: manualSlots.map(s => ({
         label: s.label,
         startHour: s.startHour,
+        startMin: s.startMin,
         count: s.count,
       })),
       title,
@@ -314,7 +316,7 @@ app.action('manual_approve', async ({ ack, body, action, client, logger }) => {
     const slotLabels = data.manualSlots.map(s => s.label).join(', ');
 
     for (const slot of data.manualSlots) {
-      await updateSheetResult(`${data.rowId}_${slot.startHour}_${String(slot.startHour).padStart(2,'0')}`, '승인 (수동)');
+      await updateSheetResult(`${data.rowId}_${slot.startHour}_${slot.startMin}`, '승인 (수동)');
     }
 
     await client.chat.postMessage({
@@ -347,7 +349,7 @@ app.action('manual_reject', async ({ ack, body, action, client, logger }) => {
     const slotLabels = data.manualSlots.map(s => s.label).join(', ');
 
     for (const slot of data.manualSlots) {
-      await updateSheetResult(`${data.rowId}_${slot.startHour}_${String(slot.startHour).padStart(2,'0')}`, '반려 (수동)');
+      await updateSheetResult(`${data.rowId}_${slot.startHour}_${slot.startMin}`, '반려 (수동)');
     }
 
     await client.chat.postMessage({
