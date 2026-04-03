@@ -18,34 +18,29 @@ const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const SHEET_NAME = process.env.SHEET_NAME || '시트1';
 const REVIEWER_SLACK_ID = process.env.REVIEWER_SLACK_ID;
 
-// 발송 가능 시간대 (08~20시)
-const VALID_HOURS = Array.from({ length: 12 }, (_, i) => i + 8); // [8,9,...,19]
-
 // 수요일 발송 불가 슬롯
 const WED_BLOCKED_HOURS = [11, 12, 13];
 
-// ── /bt 슬래시 커맨드 → 1단계 모달 ─────────────────────────────
+// ── /bt 슬래시 커맨드 → 모달 오픈 ───────────────────────────────
 app.command('/bt', async ({ command, ack, client, logger }) => {
   await ack();
-
   try {
     await client.views.open({
       trigger_id: command.trigger_id,
-      view: buildStep1Modal(),
+      view: buildModal(),
     });
   } catch (error) {
     logger.error(error);
   }
 });
 
-// ── 1단계 모달 빌더 ──────────────────────────────────────────────
-function buildStep1Modal(privateMetadata = '{}') {
+// ── 모달 빌더 ────────────────────────────────────────────────────
+function buildModal() {
   return {
     type: 'modal',
-    callback_id: 'bt_modal_step1',
-    private_metadata: privateMetadata,
-    title: { type: 'plain_text', text: '번개톡 검토 요청 (1/2)' },
-    submit: { type: 'plain_text', text: '다음' },
+    callback_id: 'bt_modal',
+    title: { type: 'plain_text', text: '번개톡 발송 검토 요청' },
+    submit: { type: 'plain_text', text: '검토 요청' },
     close: { type: 'plain_text', text: '취소' },
     blocks: [
       {
@@ -61,16 +56,20 @@ function buildStep1Modal(privateMetadata = '{}') {
       },
       {
         type: 'input',
-        block_id: 'send_hours',
-        label: { type: 'plain_text', text: '발송 시간대 (복수 선택 가능)' },
-        hint: { type: 'plain_text', text: '각 시간대 = 해당 시 ~ 다음 시 (예: 14시 = 14:00~15:00)' },
+        block_id: 'slots',
+        label: { type: 'plain_text', text: '시간대별 발송 수량' },
+        hint: {
+          type: 'plain_text',
+          text: '한 줄에 하나씩 입력 | 형식: HH:MM~HH:MM, 수량\n예) 14:00~15:00, 400000\n    14:30~15:30, 200000',
+        },
         element: {
-          type: 'checkboxes',
+          type: 'plain_text_input',
           action_id: 'value',
-          options: VALID_HOURS.map(h => ({
-            text: { type: 'plain_text', text: `${h}시` },
-            value: String(h),
-          })),
+          multiline: true,
+          placeholder: {
+            type: 'plain_text',
+            text: '14:00~15:00, 400000\n15:00~16:00, 300000',
+          },
         },
       },
       {
@@ -102,13 +101,13 @@ function buildStep1Modal(privateMetadata = '{}') {
   };
 }
 
-// ── 1단계 모달 제출 → 유효성 검사 후 2단계 모달 ────────────────
-app.view('bt_modal_step1', async ({ ack, body, view, client, logger }) => {
+// ── 모달 제출 처리 ────────────────────────────────────────────────
+app.view('bt_modal', async ({ ack, body, view, client, logger }) => {
   const v = view.state.values;
   const user = body.user;
 
   const sendDateStr = v.send_date.value.value.trim();
-  const selectedHours = (v.send_hours.value.selected_options || []).map(o => parseInt(o.value));
+  const slotsRaw = v.slots.value.value.trim();
   const title = v.title.value.value.trim();
   const bodyText = v.body.value.value.trim();
   const marketingConsent = v.marketing_consent.value.selected_option.value;
@@ -126,133 +125,52 @@ app.view('bt_modal_step1', async ({ ack, body, view, client, logger }) => {
   const sendDate = new Date(dateMatch[1], dateMatch[2] - 1, dateMatch[3]);
   const dayOfWeek = sendDate.getDay(); // 0=일, 1=월, 3=수
 
-  // 시간대 선택 여부
-  if (selectedHours.length === 0) {
+  // 슬롯 파싱
+  const parsedSlots = parseSlots(slotsRaw);
+  if (parsedSlots.error) {
     await ack({
       response_action: 'errors',
-      errors: { send_hours: '발송 시간대를 1개 이상 선택해주세요.' },
+      errors: { slots: parsedSlots.error },
     });
     return;
   }
 
-  // 수요일 블락 슬롯 체크
-  if (dayOfWeek === 3) {
-    const blockedSelected = selectedHours.filter(h => WED_BLOCKED_HOURS.includes(h));
-    if (blockedSelected.length > 0) {
-      await ack({
-        response_action: 'errors',
-        errors: {
-          send_hours: `수요일 ${blockedSelected.map(h => h + '시').join(', ')} 슬롯은 발송 불가입니다.`,
-        },
-      });
-      return;
-    }
-  }
-
   await ack();
 
-  // 1단계 데이터를 2단계 모달에 전달
-  const metadata = JSON.stringify({
-    sendDateStr,
-    selectedHours,
-    title,
-    bodyText,
-    marketingConsent,
-    userId: user.id,
-    userName: user.name,
-    requestDatetime: formatDatetime(new Date()),
-  });
-
-  try {
-    await client.views.push({
-      trigger_id: body.trigger_id,
-      view: buildStep2Modal(selectedHours, metadata),
-    });
-  } catch (error) {
-    logger.error(error);
-  }
-});
-
-// ── 2단계 모달 빌더 ──────────────────────────────────────────────
-function buildStep2Modal(selectedHours, metadata) {
-  return {
-    type: 'modal',
-    callback_id: 'bt_modal_step2',
-    private_metadata: metadata,
-    title: { type: 'plain_text', text: '번개톡 검토 요청 (2/2)' },
-    submit: { type: 'plain_text', text: '검토 요청' },
-    close: { type: 'plain_text', text: '취소' },
-    blocks: [
-      {
-        type: 'section',
-        text: { type: 'mrkdwn', text: '선택한 시간대별 발송 수량을 입력해주세요.' },
-      },
-      ...selectedHours.map(h => ({
-        type: 'input',
-        block_id: `count_${h}`,
-        label: { type: 'plain_text', text: `${h}시 슬롯 (${h}:00~${h + 1}:00) 발송 수량` },
-        hint: { type: 'plain_text', text: '숫자만 입력 (예: 400000)' },
-        element: {
-          type: 'plain_text_input',
-          action_id: 'value',
-          placeholder: { type: 'plain_text', text: '400000' },
-        },
-      })),
-    ],
-  };
-}
-
-// ── 2단계 모달 제출 → 검토 로직 ─────────────────────────────────
-app.view('bt_modal_step2', async ({ ack, body, view, client, logger }) => {
-  await ack();
-
-  const v = view.state.values;
-  const meta = JSON.parse(view.private_metadata);
-  const { sendDateStr, selectedHours, title, bodyText, marketingConsent, userId, userName, requestDatetime } = meta;
-
-  const sendDate = parseDateStr(sendDateStr);
-  const dayOfWeek = sendDate.getDay();
-
-  // 시간대별 수량 파싱
-  const slotCounts = {};
-  for (const h of selectedHours) {
-    const raw = (v[`count_${h}`]?.value?.value || '').replace(/,/g, '').trim();
-    slotCounts[h] = parseInt(raw) || 0;
-  }
-
-  // 슬롯별 검토
+  const requestDatetime = formatDatetime(new Date());
+  const rowId = Date.now().toString();
   const slotResults = [];
   let hasReject = false;
   let hasManualReview = false;
 
-  for (const h of selectedHours) {
-    const count = slotCounts[h];
+  for (const slot of parsedSlots.slots) {
+    const { startHour, startMin, endHour, endMin, count, label } = slot;
     const slotRejects = [];
     let slotManual = false;
 
-    // [1] 시간대 범위 (08~20시) - 1단계에서 이미 필터됐지만 방어 처리
-    if (h < 8 || h >= 20) {
-      slotRejects.push('발송 시간 범위 초과 (허용: 08~20시)');
+    // [1] 시간대 범위 체크 (08~20시)
+    if (startHour < 8 || startHour >= 20) {
+      slotRejects.push(`발송 시간 범위 초과 (허용: 08~20시 / 입력: ${label})`);
     }
 
-    // [2] 수요일 블락 슬롯 - 1단계에서 걸렸지만 방어 처리
-    if (dayOfWeek === 3 && WED_BLOCKED_HOURS.includes(h)) {
-      slotRejects.push('수요일 발송 불가 슬롯 (11·12·13시)');
+    // [2] 수요일 블락 슬롯 체크
+    if (dayOfWeek === 3 && WED_BLOCKED_HOURS.includes(startHour)) {
+      slotRejects.push(`수요일 발송 불가 슬롯 (11·12·13시 / 입력: ${label})`);
     }
 
-    // [3] 슬롯 40만 체크
+    // [3] 슬롯 40만 체크 (시작 시간 기준 hour 슬롯)
     if (slotRejects.length === 0) {
-      const existing = await getSlotTotal(sendDate, h);
+      const existing = await getSlotTotal(sendDate, startHour);
       const newTotal = existing + count;
       if (newTotal > 400000) {
         slotRejects.push(
-          `슬롯 초과 (기존 ${existing.toLocaleString()}건 + 요청 ${count.toLocaleString()}건 = ${newTotal.toLocaleString()}건 > 40만)`
+          `슬롯 초과 (${startHour}시 슬롯 기존 ${existing.toLocaleString()}건 + 요청 ${count.toLocaleString()}건 = ${newTotal.toLocaleString()}건 > 40만)`
         );
       }
     }
 
-    // [4] 월요일 18시 이전
-    if (slotRejects.length === 0 && dayOfWeek === 1 && h < 18) {
+    // [4] 월요일 18시 이전 체크
+    if (slotRejects.length === 0 && dayOfWeek === 1 && startHour < 18) {
       slotManual = true;
       hasManualReview = true;
     }
@@ -273,28 +191,32 @@ app.view('bt_modal_step2', async ({ ack, body, view, client, logger }) => {
 
     if (slotRejects.length > 0) hasReject = true;
 
-    slotResults.push({ hour: h, count, result: slotResult, rejects: slotRejects, manual: slotManual });
-  }
+    slotResults.push({
+      label,
+      startHour,
+      count,
+      result: slotResult,
+      rejects: slotRejects,
+      manual: slotManual,
+    });
 
-  // ── 시트 기록 (슬롯별 각 1행) ────────────────────────────────
-  const rowId = Date.now().toString();
-  for (const slot of slotResults) {
+    // 시트 기록
     await writeToSheet({
-      rowId: `${rowId}_${slot.hour}`,
+      rowId: `${rowId}_${startHour}_${startMin}`,
       requestDatetime,
-      requester: userName,
-      sendDatetime: `${sendDateStr} ${String(slot.hour).padStart(2, '0')}:00`,
-      sendCount: slot.count,
+      requester: user.name,
+      sendDatetime: `${sendDateStr} ${String(startHour).padStart(2, '0')}:${String(startMin).padStart(2, '0')}`,
+      sendCount: count,
       title,
       body: bodyText,
       marketingConsent,
-      result: slot.result,
+      result: slotResult,
     });
   }
 
   // ── 요청자 DM 결과 요약 ──────────────────────────────────────
   const overallEmoji = hasReject ? '❌' : hasManualReview ? '⏳' : '✅';
-  const overallLabel = hasReject ? '일부 반려' : hasManualReview ? '일부 수동확인 대기' : '전체 승인';
+  const overallLabel = hasReject ? '일부 반려 포함' : hasManualReview ? '일부 수동확인 대기' : '전체 승인';
 
   let resultText = `*${overallEmoji} 번개톡 발송 검토 결과*\n\n`;
   resultText += `*발송 예정 날짜:* ${sendDateStr}\n`;
@@ -303,27 +225,31 @@ app.view('bt_modal_step2', async ({ ack, body, view, client, logger }) => {
 
   for (const slot of slotResults) {
     const e = slot.result === '승인' ? '✅' : slot.result === '수동확인 대기' ? '⏳' : '❌';
-    resultText += `${e} *${slot.hour}시 슬롯* | ${slot.count.toLocaleString()}건 | ${slot.result}\n`;
+    resultText += `${e} *${slot.label}* | ${slot.count.toLocaleString()}건 | ${slot.result}\n`;
   }
 
   await client.chat.postMessage({
-    channel: userId,
+    channel: user.id,
     text: `${overallEmoji} 번개톡 검토 결과: ${overallLabel}`,
     blocks: [{ type: 'section', text: { type: 'mrkdwn', text: resultText } }],
   });
 
-  // ── 수동확인 슬롯만 추려서 담당자 DM ────────────────────────
+  // ── 수동확인 슬롯 담당자 DM ──────────────────────────────────
   const manualSlots = slotResults.filter(s => s.manual);
   if (manualSlots.length > 0) {
     const manualDetail = manualSlots
-      .map(s => `• ${s.hour}시 슬롯 | ${s.count.toLocaleString()}건`)
+      .map(s => `• ${s.label} | ${s.count.toLocaleString()}건`)
       .join('\n');
 
     const actionPayload = JSON.stringify({
       rowId,
-      userId,
+      userId: user.id,
       sendDateStr,
-      manualSlots: manualSlots.map(s => ({ hour: s.hour, count: s.count })),
+      manualSlots: manualSlots.map(s => ({
+        label: s.label,
+        startHour: s.startHour,
+        count: s.count,
+      })),
       title,
       bodyText,
       marketingConsent,
@@ -340,7 +266,7 @@ app.view('bt_modal_step2', async ({ ack, body, view, client, logger }) => {
             text: [
               '*⚠️ 번개톡 수동 확인 요청*',
               `월요일 18시 이전 발송 요청입니다.\n`,
-              `*요청자:* <@${userId}>`,
+              `*요청자:* <@${user.id}>`,
               `*발송 예정 날짜:* ${sendDateStr}`,
               `*수동확인 슬롯:*\n${manualDetail}`,
               `*제목:* ${title}`,
@@ -385,16 +311,15 @@ app.action('manual_approve', async ({ ack, body, action, client, logger }) => {
   await ack();
   try {
     const data = JSON.parse(action.value);
-    const slotLabels = data.manualSlots.map(s => `${s.hour}시`).join(', ');
+    const slotLabels = data.manualSlots.map(s => s.label).join(', ');
 
-    // 해당 슬롯 시트 결과 업데이트
     for (const slot of data.manualSlots) {
-      await updateSheetResult(`${data.rowId}_${slot.hour}`, '승인 (수동)');
+      await updateSheetResult(`${data.rowId}_${slot.startHour}_${String(slot.startHour).padStart(2,'0')}`, '승인 (수동)');
     }
 
     await client.chat.postMessage({
       channel: data.userId,
-      text: `✅ 번개톡 발송 요청이 승인되었습니다.\n발송 예정: ${data.sendDateStr} ${slotLabels} 슬롯`,
+      text: `✅ 번개톡 발송 요청이 승인되었습니다.\n발송 예정: ${data.sendDateStr} | ${slotLabels}`,
     });
 
     await client.chat.update({
@@ -403,7 +328,10 @@ app.action('manual_approve', async ({ ack, body, action, client, logger }) => {
       text: `✅ 승인 처리 완료`,
       blocks: [{
         type: 'section',
-        text: { type: 'mrkdwn', text: `✅ *승인 처리 완료*\n요청자: <@${data.userId}> | ${data.sendDateStr} ${slotLabels} 슬롯` },
+        text: {
+          type: 'mrkdwn',
+          text: `✅ *승인 처리 완료*\n요청자: <@${data.userId}> | ${data.sendDateStr} ${slotLabels}`,
+        },
       }],
     });
   } catch (error) {
@@ -416,15 +344,15 @@ app.action('manual_reject', async ({ ack, body, action, client, logger }) => {
   await ack();
   try {
     const data = JSON.parse(action.value);
-    const slotLabels = data.manualSlots.map(s => `${s.hour}시`).join(', ');
+    const slotLabels = data.manualSlots.map(s => s.label).join(', ');
 
     for (const slot of data.manualSlots) {
-      await updateSheetResult(`${data.rowId}_${slot.hour}`, '반려 (수동)');
+      await updateSheetResult(`${data.rowId}_${slot.startHour}_${String(slot.startHour).padStart(2,'0')}`, '반려 (수동)');
     }
 
     await client.chat.postMessage({
       channel: data.userId,
-      text: `❌ 번개톡 발송 요청이 반려되었습니다.\n발송 예정: ${data.sendDateStr} ${slotLabels} 슬롯\n담당자에게 문의해주세요.`,
+      text: `❌ 번개톡 발송 요청이 반려되었습니다.\n발송 예정: ${data.sendDateStr} | ${slotLabels}\n담당자에게 문의해주세요.`,
     });
 
     await client.chat.update({
@@ -433,7 +361,10 @@ app.action('manual_reject', async ({ ack, body, action, client, logger }) => {
       text: `❌ 반려 처리 완료`,
       blocks: [{
         type: 'section',
-        text: { type: 'mrkdwn', text: `❌ *반려 처리 완료*\n요청자: <@${data.userId}> | ${data.sendDateStr} ${slotLabels} 슬롯` },
+        text: {
+          type: 'mrkdwn',
+          text: `❌ *반려 처리 완료*\n요청자: <@${data.userId}> | ${data.sendDateStr} ${slotLabels}`,
+        },
       }],
     });
   } catch (error) {
@@ -441,8 +372,43 @@ app.action('manual_reject', async ({ ack, body, action, client, logger }) => {
   }
 });
 
-// ── Google Sheets 유틸 ────────────────────────────────────────────
+// ── 슬롯 텍스트 파싱 ─────────────────────────────────────────────
+// 입력 형식: 한 줄에 하나씩
+//   HH:MM~HH:MM, 수량  (예: 14:00~15:00, 400000)
+//   HH:MM, 수량        (예: 14:00, 400000)
+function parseSlots(raw) {
+  const lines = raw.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  if (lines.length === 0) return { error: '시간대를 1개 이상 입력해주세요.' };
 
+  const slots = [];
+  for (const line of lines) {
+    // HH:MM~HH:MM, 수량 또는 HH:MM, 수량
+    const match = line.match(
+      /^(\d{1,2}):(\d{2})(?:~(\d{1,2}):(\d{2}))?\s*[,\s]\s*([\d,]+)$/
+    );
+    if (!match) {
+      return {
+        error: `입력 형식 오류: "${line}"\n올바른 형식: 14:00~15:00, 400000`,
+      };
+    }
+
+    const startHour = parseInt(match[1]);
+    const startMin = parseInt(match[2]);
+    const endHour = match[3] !== undefined ? parseInt(match[3]) : null;
+    const endMin = match[4] !== undefined ? parseInt(match[4]) : null;
+    const count = parseInt(match[5].replace(/,/g, ''));
+
+    const label = endHour !== null
+      ? `${String(startHour).padStart(2,'0')}:${String(startMin).padStart(2,'0')}~${String(endHour).padStart(2,'0')}:${String(endMin).padStart(2,'0')}`
+      : `${String(startHour).padStart(2,'0')}:${String(startMin).padStart(2,'0')}`;
+
+    slots.push({ startHour, startMin, endHour, endMin, count, label });
+  }
+
+  return { slots };
+}
+
+// ── Google Sheets 유틸 ────────────────────────────────────────────
 async function getSlotTotal(sendDate, targetHour) {
   try {
     const res = await sheets.spreadsheets.values.get({
@@ -457,15 +423,12 @@ async function getSlotTotal(sendDate, targetHour) {
     for (let i = 1; i < rows.length; i++) {
       const row = rows[i];
       if (!row[3] || !row[4]) continue;
-
       const rowDatetime = parseDatetime(row[3]);
       if (!rowDatetime) continue;
-
       const rowResult = (row[8] || '').trim();
       if (toDateStr(rowDatetime) !== targetDateStr) continue;
       if (rowDatetime.getHours() !== targetHour) continue;
       if (!rowResult.startsWith('승인')) continue;
-
       total += parseInt(row[4]) || 0;
     }
     return total;
@@ -506,7 +469,6 @@ async function updateSheetResult(rowId, newResult) {
       spreadsheetId: SPREADSHEET_ID,
       range: `${SHEET_NAME}!A:I`,
     });
-
     const rows = res.data.values || [];
     for (let i = 1; i < rows.length; i++) {
       if (rows[i][0] === rowId) {
@@ -525,12 +487,6 @@ async function updateSheetResult(rowId, newResult) {
 }
 
 // ── 날짜 유틸 ─────────────────────────────────────────────────────
-function parseDateStr(str) {
-  const m = str.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) return null;
-  return new Date(m[1], m[2] - 1, m[3]);
-}
-
 function parseDatetime(str) {
   if (!str) return null;
   const m = str.trim().match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})$/);
