@@ -375,18 +375,15 @@ app.action('manual_reject', async ({ ack, body, action, client, logger }) => {
 });
 
 // ── 슬롯 텍스트 파싱 ─────────────────────────────────────────────
-// 입력 형식: 한 줄에 하나씩
-//   HH:MM~HH:MM, 수량  (예: 14:00~15:00, 400000)
-//   HH:MM, 수량        (예: 14:00, 400000)
+// 입력 형식: HH:MM~HH:MM, 수량 (1시간 단위 필수)
 function parseSlots(raw) {
   const lines = raw.split('\n').map(l => l.trim()).filter(l => l.length > 0);
   if (lines.length === 0) return { error: '시간대를 1개 이상 입력해주세요.' };
 
   const slots = [];
   for (const line of lines) {
-    // HH:MM~HH:MM, 수량 또는 HH:MM, 수량
     const match = line.match(
-      /^(\d{1,2}):(\d{2})(?:~(\d{1,2}):(\d{2}))?\s*[,\s]\s*([\d,]+)$/
+      /^(\d{1,2}):(\d{2})~(\d{1,2}):(\d{2})\s*[,\s]\s*([\d,]+)$/
     );
     if (!match) {
       return {
@@ -396,13 +393,23 @@ function parseSlots(raw) {
 
     const startHour = parseInt(match[1]);
     const startMin = parseInt(match[2]);
-    const endHour = match[3] !== undefined ? parseInt(match[3]) : null;
-    const endMin = match[4] !== undefined ? parseInt(match[4]) : null;
+    const endHour = parseInt(match[3]);
+    const endMin = parseInt(match[4]);
     const count = parseInt(match[5].replace(/,/g, ''));
 
-    const label = endHour !== null
-      ? `${String(startHour).padStart(2,'0')}:${String(startMin).padStart(2,'0')}~${String(endHour).padStart(2,'0')}:${String(endMin).padStart(2,'0')}`
-      : `${String(startHour).padStart(2,'0')}:${String(startMin).padStart(2,'0')}`;
+    if (startMin !== 0 || endMin !== 0) {
+      return {
+        error: `분 단위는 00만 허용: "${line}"\n예) 14:00~15:00, 400000`,
+      };
+    }
+
+    if (endHour - startHour !== 1) {
+      return {
+        error: `1시간 단위로만 입력 가능: "${line}"\n예) 14:00~15:00 (2시간 범위 불가)`,
+      };
+    }
+
+    const label = `${String(startHour).padStart(2,'0')}:00~${String(endHour).padStart(2,'0')}:00`;
 
     slots.push({ startHour, startMin, endHour, endMin, count, label });
   }
