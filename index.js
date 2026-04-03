@@ -167,7 +167,7 @@ app.view('bt_modal', async ({ ack, body, view, client, logger }) => {
     if (!title.includes('(광고)')) {
       rejectReasons.push('제목에 "(광고)" 미포함');
     }
-    if (!bodyText.includes('수신거부:알림설정')) {
+    if (!bodyText.includes('수신거부') || !bodyText.includes('알림설정')) {
       rejectReasons.push('본문에 "수신거부:알림설정" 미포함');
     }
   }
