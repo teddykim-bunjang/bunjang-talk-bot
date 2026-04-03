@@ -397,15 +397,12 @@ function parseSlots(raw) {
     const endMin = parseInt(match[4]);
     const count = parseInt(match[5].replace(/,/g, ''));
 
-    if (startMin !== 0 || endMin !== 0) {
+    // 범위가 정확히 1시간인지 체크 (분 단위 허용)
+    const startTotal = startHour * 60 + startMin;
+    const endTotal = endHour * 60 + endMin;
+    if (endTotal - startTotal !== 60) {
       return {
-        error: `분 단위는 00만 허용: "${line}"\n예) 14:00~15:00, 400000`,
-      };
-    }
-
-    if (endHour - startHour !== 1) {
-      return {
-        error: `1시간 단위로만 입력 가능: "${line}"\n예) 14:00~15:00 (2시간 범위 불가)`,
+        error: `발송 범위는 정확히 1시간이어야 합니다: "${line}"\n예) 14:00~15:00, 14:30~15:30`,
       };
     }
 
