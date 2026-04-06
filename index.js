@@ -512,4 +512,15 @@ function formatDatetime(date) {
 (async () => {
   await app.start(process.env.PORT || 3000);
   console.log('⚡️ 번개톡 봇 실행 중');
+
+  // Google Sheets 인증 워밍업 (첫 요청 지연 방지)
+  try {
+    await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!A1`,
+    });
+    console.log('✅ Google Sheets 인증 완료');
+  } catch (e) {
+    console.warn('⚠️ Google Sheets 워밍업 실패 (무시):', e.message);
+  }
 })();
