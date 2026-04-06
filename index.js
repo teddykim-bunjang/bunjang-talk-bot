@@ -204,7 +204,7 @@ app.view('bt_modal', async ({ ack, body, view, client, logger }) => {
   if (requestType === 'change') {
     await handleChangeRequest({
       client, user, requestDatetime,
-      originalDateStr, originalSlotsRaw,
+      originalDateStr, mappings: parsedMappings,
       sendDateStr, slots: parsedSlots.slots,
       title, bodyText, marketingConsent,
     });
@@ -459,10 +459,9 @@ app.action('change_slot_approve', async ({ ack, body, action, client, logger }) 
     } else {
       finalResult = '승인 (변경)';
       const originalDate = parseDateStr(data.originalDateStr);
-      const originalSlotLines = data.originalSlotsRaw.split('\n').map(l => l.trim()).filter(l => l);
-      for (const slotLine of originalSlotLines) {
-        const m = slotLine.match(/^(\d{1,2}):(\d{2})~(\d{1,2}):(\d{2})\s*[,\s]\s*[\d,]+$/);
-        if (m) await cancelSheetSlot(originalDate, parseInt(m[1]), parseInt(m[2]));
+      const mapping = (data.mappingsJson || []).find(m => m.newSlot.startHour === startHour && m.newSlot.startMin === startMin);
+      if (mapping) {
+        await cancelSheetSlot(originalDate, mapping.oldSlot.startHour, mapping.oldSlot.startMin);
       }
       await updateSheetResult(`${data.rowId}_${startHour}_${startMin}`, finalResult);
       await client.chat.postMessage({
