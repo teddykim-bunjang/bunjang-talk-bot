@@ -69,19 +69,6 @@ function buildModal() {
       },
       {
         type: 'input',
-        block_id: 'original_slots',
-        label: { type: 'plain_text', text: '[일정 변경] 기존 시간대' },
-        hint: { type: 'plain_text', text: '일정 변경 시에만 입력 | 형식: HH:MM~HH:MM, 수량 (여러 개면 줄바꿈)' },
-        optional: true,
-        element: {
-          type: 'plain_text_input',
-          action_id: 'value',
-          multiline: true,
-          placeholder: { type: 'plain_text', text: '14:00~15:00, 300000\n15:00~16:00, 200000' },
-        },
-      },
-      {
-        type: 'input',
         block_id: 'send_date',
         label: { type: 'plain_text', text: '발송 예정 날짜' },
         hint: { type: 'plain_text', text: '형식: YYYY-MM-DD (예: 2026-04-10)' },
@@ -94,17 +81,20 @@ function buildModal() {
       {
         type: 'input',
         block_id: 'slots',
-        label: { type: 'plain_text', text: '시간대별 발송 수량' },
-        hint: {
-          type: 'plain_text',
-          text: '한 줄에 하나씩 입력 | 형식: HH:MM~HH:MM, 수량\n예) 14:00~15:00, 400000',
-        },
+        label: { type: 'plain_text', text: '시간대 입력' },
         element: {
           type: 'plain_text_input',
           action_id: 'value',
           multiline: true,
-          placeholder: { type: 'plain_text', text: '14:00~15:00, 400000\n15:00~16:00, 300000' },
+          placeholder: { type: 'plain_text', text: '14:00~15:00, 400000' },
         },
+      },
+      {
+        type: 'context',
+        elements: [{
+          type: 'mrkdwn',
+          text: '*신규 등록 시*\n형식: `HH:MM~HH:MM, 수량`\n예) `14:00~15:00, 400000`\n\n*일정 변경 시* (기존 → 변경)\n형식: `HH:MM~HH:MM, 수량 → HH:MM~HH:MM, 수량`\n예) `14:00~15:00, 300000 → 15:00~16:00, 300000`\n구분자는 `→`, `->`, `>` 모두 사용 가능',
+        }],
       },
       {
         type: 'input',
@@ -149,21 +139,17 @@ app.view('bt_modal', async ({ ack, body, view, client, logger }) => {
 
   const requestType = v.request_type.value.selected_option.value;
   const originalDateStr = v.original_date.value?.value?.trim() || '';
-  const originalSlotsRaw = v.original_slots.value?.value?.trim() || '';
   const sendDateStr = v.send_date.value.value.trim();
   const slotsRaw = v.slots.value.value.trim();
   const title = v.title.value.value.trim();
   const bodyText = v.body.value.value.trim();
   const marketingConsent = v.marketing_consent.value.selected_option.value;
 
-  // 일정 변경인데 기존 일정 미입력 시 에러
-  if (requestType === 'change' && (!originalDateStr || !originalSlotsRaw)) {
+  // 일정 변경인데 기존 날짜 미입력 시 에러
+  if (requestType === 'change' && !originalDateStr) {
     await ack({
       response_action: 'errors',
-      errors: {
-        ...(!originalDateStr ? { original_date: '일정 변경 시 기존 발송 날짜를 입력해주세요.' } : {}),
-        ...(!originalSlotsRaw ? { original_slots: '일정 변경 시 기존 시간대를 입력해주세요.' } : {}),
-      },
+      errors: { original_date: '일정 변경 시 기존 발송 날짜를 입력해주세요.' },
     });
     return;
   }
@@ -178,41 +164,34 @@ app.view('bt_modal', async ({ ack, body, view, client, logger }) => {
     return;
   }
 
-  // 슬롯 파싱
-  const parsedSlots = parseSlots(slotsRaw);
-  if (parsedSlots.error) {
-    await ack({
-      response_action: 'errors',
-      errors: { slots: parsedSlots.error },
-    });
-    return;
+  // 슬롯 파싱 (신규: 단순 파싱 / 변경: 매핑 파싱)
+  let parsedSlots, parsedMappings;
+  if (requestType === 'change') {
+    const mappingResult = parseSlotMappings(slotsRaw);
+    if (mappingResult.error) {
+      await ack({ response_action: 'errors', errors: { slots: mappingResult.error } });
+      return;
+    }
+    parsedMappings = mappingResult.mappings;
+    parsedSlots = { slots: parsedMappings.map(m => m.newSlot) };
+  } else {
+    parsedSlots = parseSlots(slotsRaw);
+    if (parsedSlots.error) {
+      await ack({ response_action: 'errors', errors: { slots: parsedSlots.error } });
+      return;
+    }
   }
 
-  // 일정 변경 시 기존 시간대 파싱 및 수량 불일치 체크
+  // 일정 변경 시 기존 슬롯 수량 불일치 체크
   if (requestType === 'change') {
     const originalDateParsed = parseDateStr(originalDateStr);
-    const originalSlotErrors = {};
-    const originalSlotLines = originalSlotsRaw.split('\n').map(l => l.trim()).filter(l => l);
-
-    for (const line of originalSlotLines) {
-      const m = line.match(/^(\d{1,2}):(\d{2})~(\d{1,2}):(\d{2})\s*[,\s]\s*([\d,]+)$/);
-      if (!m) {
-        originalSlotErrors.original_slots = `입력 형식 오류: "${line}"\n올바른 형식: 14:00~15:00, 300000`;
-        break;
+    for (const mapping of parsedMappings) {
+      const { oldSlot } = mapping;
+      const registeredCount = await getRegisteredCount(originalDateParsed, oldSlot.startHour, oldSlot.startMin);
+      if (registeredCount !== null && registeredCount !== oldSlot.count) {
+        await ack({ response_action: 'errors', errors: { slots: `수량 불일치: ${oldSlot.label} 슬롯의 기존 등록 수량과 일치하지 않습니다.` } });
+        return;
       }
-      const startHour = parseInt(m[1]);
-      const startMin = parseInt(m[2]);
-      const inputCount = parseInt(m[5].replace(/,/g, ''));
-      const registeredCount = await getRegisteredCount(originalDateParsed, startHour, startMin);
-      if (registeredCount !== null && registeredCount !== inputCount) {
-        originalSlotErrors.original_slots = `수량 불일치: ${String(startHour).padStart(2,'0')}:${String(startMin).padStart(2,'0')}~${m[3].padStart(2,'0')}:${m[4].padStart(2,'0')} 슬롯의 기존 등록 수량과 일치하지 않습니다.`;
-        break;
-      }
-    }
-
-    if (Object.keys(originalSlotErrors).length > 0) {
-      await ack({ response_action: 'errors', errors: originalSlotErrors });
-      return;
     }
   }
 
@@ -313,11 +292,12 @@ async function handleNewRequest({ client, user, requestDatetime, sendDate, sendD
 }
 
 // ── 일정 변경 수동 검토 요청 ─────────────────────────────────────
-async function handleChangeRequest({ client, user, requestDatetime, originalDateStr, originalSlotsRaw, sendDateStr, slots, title, bodyText, marketingConsent }) {
+async function handleChangeRequest({ client, user, requestDatetime, originalDateStr, mappings, sendDateStr, slots, title, bodyText, marketingConsent }) {
   const rowId = `change_${Date.now()}`;
 
-  // 변경 요청 시트 기록 (수동확인 대기)
-  for (const slot of slots) {
+  // 변경 요청 시트 기록 (수동확인 대기) - 매핑 기준으로 기록
+  for (const mapping of mappings) {
+    const slot = mapping.newSlot;
     await writeToSheet({
       rowId: `${rowId}_${slot.startHour}_${slot.startMin}`,
       requestDatetime, requester: user.name,
@@ -327,6 +307,9 @@ async function handleChangeRequest({ client, user, requestDatetime, originalDate
     });
   }
 
+  // 매핑 요약 텍스트
+  const mappingSummary = mappings.map(m => `• ${m.oldSlot.label} → ${m.newSlot.label} | ${m.newSlot.count.toLocaleString()}건`).join('\n');
+
   // 요청자 접수 확인 DM
   await client.chat.postMessage({
     channel: user.id,
@@ -335,17 +318,16 @@ async function handleChangeRequest({ client, user, requestDatetime, originalDate
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `*⏳ 일정 변경 요청 접수*\n\n*기존 일정:* ${originalDateStr} | ${originalSlotsRaw.replace(/\n/g, ', ')}\n*변경 일정:* ${sendDateStr} | ${slots.map(s => s.label).join(', ')}\n\n담당자 검토 후 결과를 안내드립니다.`,
+        text: `*⏳ 일정 변경 요청 접수*\n\n*기존 날짜:* ${originalDateStr}\n*변경 날짜:* ${sendDateStr}\n\n*슬롯 매핑:*\n${mappingSummary}\n\n담당자 검토 후 결과를 안내드립니다.`,
       },
     }],
   });
 
-  // 담당자 DM (슬롯별 개별 승인/반려 버튼)
-  const commonInfo = JSON.stringify({
-    rowId, userId: user.id, userName: user.name,
-    originalDateStr, originalSlotsRaw,
-    sendDateStr, title, bodyText, marketingConsent,
-  });
+  // mappings를 JSON으로 직렬화해서 페이로드에 포함
+  const mappingsJson = mappings.map(m => ({
+    oldSlot: { label: m.oldSlot.label, startHour: m.oldSlot.startHour, startMin: m.oldSlot.startMin, count: m.oldSlot.count },
+    newSlot: { label: m.newSlot.label, startHour: m.newSlot.startHour, startMin: m.newSlot.startMin, count: m.newSlot.count },
+  }));
 
   const headerBlocks = [
     {
@@ -355,8 +337,9 @@ async function handleChangeRequest({ client, user, requestDatetime, originalDate
         text: [
           '*🔄 번개톡 일정 변경 검토 요청*\n',
           `*요청자:* <@${user.id}>`,
-          `*기존 일정:* ${originalDateStr} | ${originalSlotsRaw.replace(/\n/g, ', ')}`,
-          `*변경 일정:* ${sendDateStr}`,
+          `*기존 날짜:* ${originalDateStr}`,
+          `*변경 날짜:* ${sendDateStr}`,
+          `*슬롯 매핑:*\n${mappingSummary}`,
           `*제목:* ${title}`,
           `*본문:* ${bodyText.substring(0, 100)}${bodyText.length > 100 ? '...' : ''}`,
           `*마수신 동의:* ${marketingConsent}`,
@@ -366,14 +349,14 @@ async function handleChangeRequest({ client, user, requestDatetime, originalDate
     { type: 'divider' },
   ];
 
-  // 슬롯별 섹션 + 버튼 블록 생성 (전체 슬롯 목록을 페이로드에 포함)
-  const allSlots = slots.map(s => ({ label: s.label, startHour: s.startHour, startMin: s.startMin, count: s.count }));
-  const slotBlocks = buildSlotBlocks({
+  const allSlots = mappings.map(m => ({ label: m.newSlot.label, startHour: m.newSlot.startHour, startMin: m.newSlot.startMin, count: m.newSlot.count }));
+  const baseData = {
     rowId, userId: user.id, userName: user.name,
-    originalDateStr, originalSlotsRaw,
+    originalDateStr, mappingsJson,
     sendDateStr, title, bodyText, marketingConsent,
     allSlots,
-  }, {});
+  };
+  const slotBlocks = buildSlotBlocks(baseData, {});
 
   await client.chat.postMessage({
     channel: REVIEWER_SLACK_ID,
@@ -698,6 +681,55 @@ function parseSlots(raw) {
   return { slots };
 }
 
+// ── 슬롯 매핑 파싱 (일정 변경용) ───────────────────────────────
+// 형식: HH:MM~HH:MM, 수량 → HH:MM~HH:MM, 수량 (→, ->, > 모두 허용)
+function parseSlotMappings(raw) {
+  const lines = raw.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  if (lines.length === 0) return { error: '시간대 매핑을 1개 이상 입력해주세요.' };
+
+  const mappings = [];
+  const slotPattern = /^(\d{1,2}):(\d{2})~(\d{1,2}):(\d{2})\s*[,\s]\s*([\d,]+)$/;
+
+  for (const line of lines) {
+    const parts = line.split(/\s*(→|->|>)\s*/);
+    if (parts.length < 3) {
+      return { error: `구분자(→, ->, >) 없음: "${line}"\n예) 14:00~15:00, 300000 → 15:00~16:00, 300000` };
+    }
+
+    const oldPart = parts[0].trim();
+    const newPart = parts[parts.length - 1].trim();
+
+    const oldMatch = oldPart.match(slotPattern);
+    if (!oldMatch) return { error: `기존 슬롯 형식 오류: "${oldPart}"\n올바른 형식: 14:00~15:00, 300000` };
+
+    const newMatch = newPart.match(slotPattern);
+    if (!newMatch) return { error: `변경 슬롯 형식 오류: "${newPart}"\n올바른 형식: 14:00~15:00, 300000` };
+
+    // 1시간 범위 체크
+    const oldStart = parseInt(oldMatch[1]) * 60 + parseInt(oldMatch[2]);
+    const oldEnd = parseInt(oldMatch[3]) * 60 + parseInt(oldMatch[4]);
+    if (oldEnd - oldStart !== 60) return { error: `기존 슬롯 범위는 정확히 1시간이어야 합니다: "${oldPart}"` };
+
+    const newStart = parseInt(newMatch[1]) * 60 + parseInt(newMatch[2]);
+    const newEnd = parseInt(newMatch[3]) * 60 + parseInt(newMatch[4]);
+    if (newEnd - newStart !== 60) return { error: `변경 슬롯 범위는 정확히 1시간이어야 합니다: "${newPart}"` };
+
+    // 수량 유효성 체크
+    const oldCount = parseInt(oldMatch[5].replace(/,/g, ''));
+    const newCount = parseInt(newMatch[5].replace(/,/g, ''));
+    if (isNaN(oldCount) || oldCount <= 0) return { error: `기존 슬롯 수량 오류: "${oldPart}"` };
+    if (isNaN(newCount) || newCount <= 0) return { error: `변경 슬롯 수량 오류: "${newPart}"` };
+
+    const makeLabel = (m) => `${String(parseInt(m[1])).padStart(2,'0')}:${m[2]}~${String(parseInt(m[3])).padStart(2,'0')}:${m[4]}`;
+
+    mappings.push({
+      oldSlot: { label: makeLabel(oldMatch), startHour: parseInt(oldMatch[1]), startMin: parseInt(oldMatch[2]), count: oldCount },
+      newSlot: { label: makeLabel(newMatch), startHour: parseInt(newMatch[1]), startMin: parseInt(newMatch[2]), count: newCount },
+    });
+  }
+  return { mappings };
+}
+
 // ── Google Sheets 유틸 ────────────────────────────────────────────
 
 // 기존 등록된 특정 슬롯의 수량 조회 (일정 변경 수량 검증용)
@@ -906,6 +938,9 @@ app.command('/bt-status', async ({ command, ack, client, logger }) => {
 
 // ── 일정 변경 헤더 블록 빌더 ────────────────────────────────────
 function buildChangeHeaderBlocks(data) {
+  const mappingSummary = (data.mappingsJson || [])
+    .map(m => `• ${m.oldSlot.label} → ${m.newSlot.label} | ${m.newSlot.count.toLocaleString()}건`)
+    .join('\n');
   return [
     {
       type: 'section',
@@ -914,8 +949,9 @@ function buildChangeHeaderBlocks(data) {
         text: [
           '*🔄 번개톡 일정 변경 검토 요청*\n',
           `*요청자:* <@${data.userId}>`,
-          `*기존 일정:* ${data.originalDateStr} | ${data.originalSlotsRaw.replace(/\n/g, ', ')}`,
-          `*변경 일정:* ${data.sendDateStr}`,
+          `*기존 날짜:* ${data.originalDateStr}`,
+          `*변경 날짜:* ${data.sendDateStr}`,
+          `*슬롯 매핑:*\n${mappingSummary}`,
           `*제목:* ${data.title}`,
           `*본문:* ${data.bodyText.substring(0, 100)}${data.bodyText.length > 100 ? '...' : ''}`,
           `*마수신 동의:* ${data.marketingConsent}`,
@@ -928,6 +964,9 @@ function buildChangeHeaderBlocks(data) {
 
 // ── 일정 변경 헤더 블록 빌더 ────────────────────────────────────
 function buildChangeHeaderBlocks(data) {
+  const mappingSummary = (data.mappingsJson || [])
+    .map(m => `• ${m.oldSlot.label} → ${m.newSlot.label} | ${m.newSlot.count.toLocaleString()}건`)
+    .join('\n');
   return [
     {
       type: 'section',
@@ -936,8 +975,9 @@ function buildChangeHeaderBlocks(data) {
         text: [
           '*🔄 번개톡 일정 변경 검토 요청*\n',
           `*요청자:* <@${data.userId}>`,
-          `*기존 일정:* ${data.originalDateStr} | ${data.originalSlotsRaw.replace(/\n/g, ', ')}`,
-          `*변경 일정:* ${data.sendDateStr}`,
+          `*기존 날짜:* ${data.originalDateStr}`,
+          `*변경 날짜:* ${data.sendDateStr}`,
+          `*슬롯 매핑:*\n${mappingSummary}`,
           `*제목:* ${data.title}`,
           `*본문:* ${data.bodyText.substring(0, 100)}${data.bodyText.length > 100 ? '...' : ''}`,
           `*마수신 동의:* ${data.marketingConsent}`,
