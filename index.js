@@ -87,13 +87,13 @@ function buildModal() {
       {
         type: 'input',
         block_id: 'marketing_consent',
-        label: { type: 'plain_text', text: '마케팅 수신 동의 여부' },
+        label: { type: 'plain_text', text: '마케팅 수신 대상 여부' },
         element: {
           type: 'radio_buttons',
           action_id: 'value',
           options: [
-            { text: { type: 'plain_text', text: 'O (동의)' }, value: 'Y' },
-            { text: { type: 'plain_text', text: 'X (미동의)' }, value: 'N' },
+            { text: { type: 'plain_text', text: 'O (수신 대상)' }, value: 'Y' },
+            { text: { type: 'plain_text', text: 'X (수신 대상 아님)' }, value: 'N' },
           ],
         },
       },
