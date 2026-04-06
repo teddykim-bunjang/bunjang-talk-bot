@@ -159,12 +159,12 @@ app.view('bt_modal', async ({ ack, body, view, client, logger }) => {
   const user = body.user;
 
   const requestType = v.request_type?.request_type_changed?.selected_option?.value || 'new';
-  const originalDateStr = v.original_date.value?.value?.trim() || '';
-  const sendDateStr = v.send_date.value.value.trim();
-  const slotsRaw = v.slots.value.value.trim();
-  const title = v.title.value.value.trim();
-  const bodyText = v.body.value.value.trim();
-  const marketingConsent = v.marketing_consent.value.selected_option.value;
+  const originalDateStr = v.original_date?.value?.value?.trim() || '';
+  const sendDateStr = v.send_date?.value?.value?.trim() || '';
+  const slotsRaw = v.slots?.value?.value?.trim() || '';
+  const title = v.title?.value?.value?.trim() || '';
+  const bodyText = v.body?.value?.value?.trim() || '';
+  const marketingConsent = v.marketing_consent?.value?.selected_option?.value || 'N';
 
   // 일정 변경인데 기존 날짜 미입력 시 에러
   if (requestType === 'change' && !originalDateStr) {
