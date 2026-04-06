@@ -340,143 +340,157 @@ async function handleChangeRequest({ client, user, requestDatetime, originalDate
     }],
   });
 
-  // 담당자 DM (승인/반려 버튼)
-  const actionPayload = JSON.stringify({
+  // 담당자 DM (슬롯별 개별 승인/반려 버튼)
+  const commonInfo = JSON.stringify({
     rowId, userId: user.id, userName: user.name,
     originalDateStr, originalSlotsRaw,
-    sendDateStr,
-    slots: slots.map(s => ({ label: s.label, startHour: s.startHour, startMin: s.startMin, count: s.count })),
-    title, bodyText, marketingConsent,
+    sendDateStr, title, bodyText, marketingConsent,
   });
 
-  const slotSummary = slots.map(s => `• ${s.label} | ${s.count.toLocaleString()}건`).join('\n');
+  const headerBlocks = [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: [
+          '*🔄 번개톡 일정 변경 검토 요청*\n',
+          `*요청자:* <@${user.id}>`,
+          `*기존 일정:* ${originalDateStr} | ${originalSlotsRaw.replace(/\n/g, ', ')}`,
+          `*변경 일정:* ${sendDateStr}`,
+          `*제목:* ${title}`,
+          `*본문:* ${bodyText.substring(0, 100)}${bodyText.length > 100 ? '...' : ''}`,
+          `*마수신 동의:* ${marketingConsent}`,
+        ].join('\n'),
+      },
+    },
+    { type: 'divider' },
+  ];
+
+  // 슬롯별 섹션 + 버튼 블록 생성
+  const slotBlocks = [];
+  for (const slot of slots) {
+    const slotPayload = JSON.stringify({
+      rowId, userId: user.id, userName: user.name,
+      originalDateStr, originalSlotsRaw,
+      sendDateStr, title, bodyText, marketingConsent,
+      slot: { label: slot.label, startHour: slot.startHour, startMin: slot.startMin, count: slot.count },
+    });
+
+    slotBlocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: `*${slot.label}* | ${slot.count.toLocaleString()}건` },
+    });
+    slotBlocks.push({
+      type: 'actions',
+      block_id: `slot_actions_${slot.startHour}_${slot.startMin}`,
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: '✅ 승인' },
+          style: 'primary',
+          action_id: 'change_slot_approve',
+          value: slotPayload,
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: '❌ 반려' },
+          style: 'danger',
+          action_id: 'change_slot_reject_open',
+          value: slotPayload,
+        },
+      ],
+    });
+  }
 
   await client.chat.postMessage({
     channel: REVIEWER_SLACK_ID,
     text: '🔄 번개톡 일정 변경 검토 요청',
-    blocks: [
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: [
-            '*🔄 번개톡 일정 변경 검토 요청*\n',
-            `*요청자:* <@${user.id}>`,
-            `*기존 일정:* ${originalDateStr} | ${originalSlotsRaw.replace(/\n/g, ', ')}`,
-            `*변경 일정:* ${sendDateStr}`,
-            `*변경 슬롯:*\n${slotSummary}`,
-            `*제목:* ${title}`,
-            `*본문:* ${bodyText.substring(0, 100)}${bodyText.length > 100 ? '...' : ''}`,
-            `*마수신 동의:* ${marketingConsent}`,
-          ].join('\n'),
-        },
-      },
-      {
-        type: 'actions',
-        block_id: 'change_review_actions',
-        elements: [
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: '✅ 승인' },
-            style: 'primary',
-            action_id: 'change_approve',
-            value: actionPayload,
-          },
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: '❌ 반려' },
-            style: 'danger',
-            action_id: 'change_reject_open',
-            value: actionPayload,
-          },
-        ],
-      },
-    ],
+    blocks: [...headerBlocks, ...slotBlocks],
   });
 }
 
-// ── 일정 변경 승인 ────────────────────────────────────────────────
-app.action('change_approve', async ({ ack, body, action, client, logger }) => {
+// ── 슬롯별 승인 ──────────────────────────────────────────────────
+app.action('change_slot_approve', async ({ ack, body, action, client, logger }) => {
   await ack();
   try {
     const data = JSON.parse(action.value);
+    const { slot } = data;
+    const { startHour, startMin, count, label } = slot;
 
-    // 신규 슬롯 검증 먼저
+    // 신규 슬롯 검증
     const sendDate = parseDateStr(data.sendDateStr);
     const dayOfWeek = sendDate.getDay();
-    const slotResults = [];
-    let hasReject = false;
+    const slotRejects = [];
 
-    for (const slot of data.slots) {
-      const { startHour, startMin, count, label } = slot;
-      const slotRejects = [];
-
-      if (startHour < 8 || startHour >= 20) slotRejects.push(`발송 시간 범위 초과 (${label})`);
-      if (dayOfWeek === 3 && WED_BLOCKED_HOURS.includes(startHour)) slotRejects.push(`수요일 발송 불가 슬롯 (${label})`);
-      if (slotRejects.length === 0) {
-        const existing = await getSlotTotal(sendDate, startHour);
-        const newTotal = existing + count;
-        if (newTotal > 400000) slotRejects.push(`슬롯 초과 (${startHour}시 ${existing.toLocaleString()}+${count.toLocaleString()}=${newTotal.toLocaleString()} > 40만)`);
-      }
-      if (slotRejects.length === 0 && data.marketingConsent === 'Y') {
-        if (!data.title.includes('(광고)')) slotRejects.push('제목에 "(광고)" 미포함');
-        if (!data.bodyText.includes('수신거부') || !data.bodyText.includes('알림설정')) slotRejects.push('본문에 "수신거부:알림설정" 미포함');
-      }
-
-      const slotResult = slotRejects.length > 0 ? `반려 (${slotRejects.join(' / ')})` : '승인 (변경)';
-      if (slotRejects.length > 0) hasReject = true;
-
-      slotResults.push({ label, startHour, startMin, count, result: slotResult, rejects: slotRejects });
+    if (startHour < 8 || startHour >= 20) slotRejects.push(`발송 시간 범위 초과 (${label})`);
+    if (dayOfWeek === 3 && WED_BLOCKED_HOURS.includes(startHour)) slotRejects.push(`수요일 발송 불가 슬롯 (${label})`);
+    if (slotRejects.length === 0) {
+      const existing = await getSlotTotal(sendDate, startHour);
+      const newTotal = existing + count;
+      if (newTotal > 400000) slotRejects.push(`슬롯 초과 (${startHour}시 ${existing.toLocaleString()}+${count.toLocaleString()}=${newTotal.toLocaleString()} > 40만)`);
+    }
+    if (slotRejects.length === 0 && data.marketingConsent === 'Y') {
+      if (!data.title.includes('(광고)')) slotRejects.push('제목에 "(광고)" 미포함');
+      if (!data.bodyText.includes('수신거부') || !data.bodyText.includes('알림설정')) slotRejects.push('본문에 "수신거부:알림설정" 미포함');
     }
 
-    // 검증 결과에 따라 원본 취소 여부 결정
+    if (slotRejects.length > 0) {
+      // 검증 실패 → 반려로 처리
+      const rejectResult = `반려 (${slotRejects.join(' / ')})`;
+      await updateSheetResult(`${data.rowId}_${startHour}_${startMin}`, rejectResult);
+      await client.chat.postMessage({
+        channel: data.userId,
+        text: `❌ 일정 변경 반려: ${label}`,
+        blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `*❌ 일정 변경 반려*
+*슬롯:* ${label} | ${count.toLocaleString()}건
+*사유:* ${slotRejects.join(', ')}
+기존 일정이 유지됩니다.` } }],
+      });
+      await client.chat.update({
+        channel: body.channel.id, ts: body.message.ts,
+        text: `❌ 반려 처리됨: ${label}`,
+        blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `❌ *반려 처리됨* (검증 실패)
+*슬롯:* ${label} | 사유: ${slotRejects.join(', ')}` } }],
+      });
+      return;
+    }
+
+    // 검증 통과 → 원본 취소 + 승인 처리
     const originalDate = parseDateStr(data.originalDateStr);
     const originalSlotLines = data.originalSlotsRaw.split('\n').map(l => l.trim()).filter(l => l);
-
-    for (const slot of slotResults) {
-      if (slot.result === '승인 (변경)') {
-        // 승인된 슬롯만 원본 취소 (수량 포함 형식: HH:MM~HH:MM, 수량)
-        for (const slotLine of originalSlotLines) {
-          const m = slotLine.match(/^(\d{1,2}):(\d{2})~(\d{1,2}):(\d{2})\s*[,\s]\s*[\d,]+$/);
-          if (m) await cancelSheetSlot(originalDate, parseInt(m[1]), parseInt(m[2]));
-        }
-      }
-      // change_ 행 결과 업데이트
-      await updateSheetResult(`${data.rowId}_${slot.startHour}_${slot.startMin}`, slot.result);
+    for (const slotLine of originalSlotLines) {
+      const m = slotLine.match(/^(\d{1,2}):(\d{2})~(\d{1,2}):(\d{2})\s*[,\s]\s*[\d,]+$/);
+      if (m) await cancelSheetSlot(originalDate, parseInt(m[1]), parseInt(m[2]));
     }
+    await updateSheetResult(`${data.rowId}_${startHour}_${startMin}`, '승인 (변경)');
 
-    // 요청자 결과 DM
-    const overallEmoji = hasReject ? '❌' : '✅';
-    let resultText = `*${overallEmoji} 일정 변경 검토 결과*\n\n*변경 일정:* ${data.sendDateStr}\n\n*시간대별 결과:*\n`;
-    for (const s of slotResults) {
-      const e = s.result.startsWith('승인') ? '✅' : '❌';
-      resultText += `${e} *${s.label}* | ${s.count.toLocaleString()}건 | ${s.result}\n`;
-    }
-    if (hasReject) {
-      resultText += `\n반려된 슬롯이 있어 해당 기존 일정은 유지됩니다.`;
-    }
-    await client.chat.postMessage({ channel: data.userId, text: `${overallEmoji} 일정 변경 결과 안내`, blocks: [{ type: 'section', text: { type: 'mrkdwn', text: resultText } }] });
-
-    // 담당자 메시지 업데이트
+    await client.chat.postMessage({
+      channel: data.userId,
+      text: `✅ 일정 변경 승인: ${label}`,
+      blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `*✅ 일정 변경 승인*
+*슬롯:* ${label} | ${count.toLocaleString()}건
+*변경 일정:* ${data.sendDateStr}` } }],
+    });
     await client.chat.update({
       channel: body.channel.id, ts: body.message.ts,
-      text: `${overallEmoji} 일정 변경 처리 완료`,
-      blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `${overallEmoji} *일정 변경 처리 완료*\n요청자: <@${data.userId}> | ${data.sendDateStr}${hasReject ? ' (일부 반려)' : ''}` } }],
+      text: `✅ 승인 처리됨: ${label}`,
+      blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `✅ *승인 처리됨*
+*슬롯:* ${label} | ${count.toLocaleString()}건` } }],
     });
   } catch (error) {
     logger.error(error);
   }
 });
 
-// ── 일정 변경 반려 버튼 → 사유 입력 모달 ────────────────────────
-app.action('change_reject_open', async ({ ack, body, action, client, logger }) => {
+// ── 슬롯별 반려 버튼 → 사유 입력 모달 ───────────────────────────
+app.action('change_slot_reject_open', async ({ ack, body, action, client, logger }) => {
   await ack();
   try {
     await client.views.open({
       trigger_id: body.trigger_id,
       view: {
         type: 'modal',
-        callback_id: 'change_reject_modal',
+        callback_id: 'change_slot_reject_modal',
         private_metadata: JSON.stringify({
           payload: action.value,
           channelId: body.channel.id,
@@ -505,40 +519,33 @@ app.action('change_reject_open', async ({ ack, body, action, client, logger }) =
   }
 });
 
-// ── 일정 변경 반려 처리 ──────────────────────────────────────────
-app.view('change_reject_modal', async ({ ack, body, view, client, logger }) => {
+// ── 슬롯별 반려 처리 ─────────────────────────────────────────────
+app.view('change_slot_reject_modal', async ({ ack, body, view, client, logger }) => {
   await ack();
   try {
     const meta = JSON.parse(view.private_metadata);
     const data = JSON.parse(meta.payload);
+    const { slot } = data;
     const rejectReason = view.state.values.reject_reason.value.value.trim();
 
-    // 시트 결과 업데이트
-    for (const slot of data.slots) {
-      await updateSheetResult(`${data.rowId}_${slot.startHour}_${slot.startMin}`, `반려 (변경) - ${rejectReason}`);
-    }
+    await updateSheetResult(`${data.rowId}_${slot.startHour}_${slot.startMin}`, `반려 (변경) - ${rejectReason}`);
 
-    // 요청자 반려 알림 DM
     await client.chat.postMessage({
       channel: data.userId,
-      text: '❌ 일정 변경 요청이 반려되었습니다.',
-      blocks: [{
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: `*❌ 일정 변경 요청 반려*\n\n*기존 일정 유지:* ${data.originalDateStr} | ${data.originalSlotsRaw.replace(/\n/g, ', ')}\n*반려 사유:* ${rejectReason}\n\n문의사항은 담당자에게 연락해주세요.`,
-        },
-      }],
+      text: `❌ 일정 변경 반려: ${slot.label}`,
+      blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `*❌ 일정 변경 반려*
+*슬롯:* ${slot.label} | ${slot.count.toLocaleString()}건
+*반려 사유:* ${rejectReason}
+기존 일정이 유지됩니다.
+
+문의사항은 담당자에게 연락해주세요.` } }],
     });
 
-    // 담당자 메시지 업데이트
     await client.chat.update({
       channel: meta.channelId, ts: meta.messageTs,
-      text: '❌ 일정 변경 반려 완료',
-      blocks: [{
-        type: 'section',
-        text: { type: 'mrkdwn', text: `❌ *일정 변경 반려 완료*\n요청자: <@${data.userId}> | 사유: ${rejectReason}` },
-      }],
+      text: `❌ 반려 처리됨: ${slot.label}`,
+      blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `❌ *반려 처리됨*
+*슬롯:* ${slot.label} | 사유: ${rejectReason}` } }],
     });
   } catch (error) {
     logger.error(error);
