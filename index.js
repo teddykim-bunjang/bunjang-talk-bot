@@ -806,9 +806,7 @@ app.command('/bt-status', async ({ command, ack, client, logger }) => {
     if (!dateMatch) {
       await client.chat.postMessage({
         channel: command.user_id,
-        text: '❌ 날짜 형식 오류
-올바른 형식: `/bt-status YYYY-MM-DD`
-예) `/bt-status 2026-04-29`',
+        text: '❌ 날짜 형식 오류\n올바른 형식: `/bt-status YYYY-MM-DD`\n예) `/bt-status 2026-04-29`',
       });
       return;
     }
