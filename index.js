@@ -188,6 +188,26 @@ app.view('bt_modal', async ({ ack, body, view, client, logger }) => {
     return;
   }
 
+  // 일정 변경 시 기존 수량 불일치 체크
+  if (requestType === 'change') {
+    const originalDate = parseDateStr(sendDateStr);
+    const originalDateParsed = parseDateStr(originalDateStr);
+    const countErrors = {};
+
+    for (const slot of parsedSlots.slots) {
+      const registeredCount = await getRegisteredCount(originalDateParsed, slot.startHour, slot.startMin);
+      if (registeredCount !== null && registeredCount !== slot.count) {
+        countErrors.slots = `수량 불일치: ${slot.label} 슬롯의 기존 등록 수량은 ${registeredCount.toLocaleString()}건입니다. 수량을 변경하려면 담당자에게 문의해주세요.`;
+        break;
+      }
+    }
+
+    if (Object.keys(countErrors).length > 0) {
+      await ack({ response_action: 'errors', errors: countErrors });
+      return;
+    }
+  }
+
   await ack();
 
   const requestDatetime = formatDatetime(new Date());
@@ -373,17 +393,7 @@ app.action('change_approve', async ({ ack, body, action, client, logger }) => {
   try {
     const data = JSON.parse(action.value);
 
-    // 기존 슬롯 시트에서 취소 처리
-    const originalSlotLines = data.originalSlotsRaw.split('\n').map(l => l.trim()).filter(l => l);
-    const originalDate = parseDateStr(data.originalDateStr);
-    for (const slotLine of originalSlotLines) {
-      const m = slotLine.match(/^(\d{1,2}):(\d{2})~(\d{1,2}):(\d{2})$/);
-      if (m) {
-        await cancelSheetSlot(originalDate, parseInt(m[1]), parseInt(m[2]));
-      }
-    }
-
-    // 신규 슬롯 검증 및 change_ 행 업데이트 (새 행 추가 없음)
+    // 신규 슬롯 검증 먼저
     const sendDate = parseDateStr(data.sendDateStr);
     const dayOfWeek = sendDate.getDay();
     const slotResults = [];
@@ -408,26 +418,42 @@ app.action('change_approve', async ({ ack, body, action, client, logger }) => {
       const slotResult = slotRejects.length > 0 ? `반려 (${slotRejects.join(' / ')})` : '승인 (변경)';
       if (slotRejects.length > 0) hasReject = true;
 
-      slotResults.push({ label, count, result: slotResult, rejects: slotRejects });
+      slotResults.push({ label, startHour, startMin, count, result: slotResult, rejects: slotRejects });
+    }
 
-      // change_ 행 결과 업데이트 (새 행 추가 없음)
-      await updateSheetResult(`${data.rowId}_${startHour}_${startMin}`, slotResult);
+    // 검증 결과에 따라 원본 취소 여부 결정
+    const originalDate = parseDateStr(data.originalDateStr);
+    const originalSlotLines = data.originalSlotsRaw.split('\n').map(l => l.trim()).filter(l => l);
+
+    for (const slot of slotResults) {
+      if (slot.result === '승인 (변경)') {
+        // 승인된 슬롯만 원본 취소
+        for (const slotLine of originalSlotLines) {
+          const m = slotLine.match(/^(\d{1,2}):(\d{2})~(\d{1,2}):(\d{2})$/);
+          if (m) await cancelSheetSlot(originalDate, parseInt(m[1]), parseInt(m[2]));
+        }
+      }
+      // change_ 행 결과 업데이트
+      await updateSheetResult(`${data.rowId}_${slot.startHour}_${slot.startMin}`, slot.result);
     }
 
     // 요청자 결과 DM
     const overallEmoji = hasReject ? '❌' : '✅';
     let resultText = `*${overallEmoji} 일정 변경 검토 결과*\n\n*변경 일정:* ${data.sendDateStr}\n\n*시간대별 결과:*\n`;
     for (const s of slotResults) {
-      const e = s.result === '승인' ? '✅' : '❌';
+      const e = s.result.startsWith('승인') ? '✅' : '❌';
       resultText += `${e} *${s.label}* | ${s.count.toLocaleString()}건 | ${s.result}\n`;
+    }
+    if (hasReject) {
+      resultText += `\n반려된 슬롯이 있어 해당 기존 일정은 유지됩니다.`;
     }
     await client.chat.postMessage({ channel: data.userId, text: `${overallEmoji} 일정 변경 결과 안내`, blocks: [{ type: 'section', text: { type: 'mrkdwn', text: resultText } }] });
 
     // 담당자 메시지 업데이트
     await client.chat.update({
       channel: body.channel.id, ts: body.message.ts,
-      text: '✅ 일정 변경 승인 완료',
-      blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `✅ *일정 변경 승인 완료*\n요청자: <@${data.userId}> | ${data.sendDateStr}` } }],
+      text: `${overallEmoji} 일정 변경 처리 완료`,
+      blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `${overallEmoji} *일정 변경 처리 완료*\n요청자: <@${data.userId}> | ${data.sendDateStr}${hasReject ? ' (일부 반려)' : ''}` } }],
     });
   } catch (error) {
     logger.error(error);
@@ -612,7 +638,12 @@ function parseSlots(raw) {
     const startMin = parseInt(match[2]);
     const endHour = parseInt(match[3]);
     const endMin = parseInt(match[4]);
-    const count = parseInt(match[5].replace(/,/g, ''));
+    const countRaw = match[5].replace(/,/g, '');
+    const count = parseInt(countRaw);
+    if (isNaN(count) || count <= 0) {
+      return { error: `수량이 올바르지 않습니다: "${line}"
+0보다 큰 숫자를 입력해주세요.` };
+    }
 
     const startTotal = startHour * 60 + startMin;
     const endTotal = endHour * 60 + endMin;
@@ -627,6 +658,33 @@ function parseSlots(raw) {
 }
 
 // ── Google Sheets 유틸 ────────────────────────────────────────────
+
+// 기존 등록된 특정 슬롯의 수량 조회 (일정 변경 수량 검증용)
+async function getRegisteredCount(sendDate, targetHour, targetMin) {
+  try {
+    const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: `${SHEET_NAME}!A:I` });
+    const rows = res.data.values || [];
+    const targetDateStr = toDateStr(sendDate);
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      if (!row[3] || !row[4]) continue;
+      const rowDatetime = parseDatetime(row[3]);
+      if (!rowDatetime) continue;
+      if (toDateStr(rowDatetime) !== targetDateStr) continue;
+      if (rowDatetime.getHours() !== targetHour) continue;
+      if (rowDatetime.getMinutes() !== targetMin) continue;
+      const rowResult = (row[8] || '').trim();
+      if (rowResult.startsWith('승인') || rowResult.includes('수동확인 대기')) {
+        return parseInt(row[4]) || null;
+      }
+    }
+    return null; // 등록된 건 없으면 null (체크 스킵)
+  } catch (error) {
+    console.error('수량 조회 오류:', error);
+    return null;
+  }
+}
+
 async function getSlotTotal(sendDate, targetHour) {
   try {
     const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: `${SHEET_NAME}!A:I` });
