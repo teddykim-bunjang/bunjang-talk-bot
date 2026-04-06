@@ -796,6 +796,90 @@ function formatDatetime(date) {
   return `${toDateStr(date)} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
 }
 
+// ── /bt-status 커맨드 → 날짜별 슬롯 현황 ──────────────────────
+app.command('/bt-status', async ({ command, ack, client, logger }) => {
+  await ack();
+  try {
+    const dateStr = command.text.trim();
+    const dateMatch = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+
+    if (!dateMatch) {
+      await client.chat.postMessage({
+        channel: command.user_id,
+        text: '❌ 날짜 형식 오류
+올바른 형식: `/bt-status YYYY-MM-DD`
+예) `/bt-status 2026-04-29`',
+      });
+      return;
+    }
+
+    const targetDate = new Date(dateMatch[1], dateMatch[2] - 1, dateMatch[3]);
+    const dayNames = ['일', '월', '화', '수', '목', '금', '토'];
+    const dayName = dayNames[targetDate.getDay()];
+
+    // 시트에서 해당 날짜 승인 건 집계
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!A:I`,
+    });
+    const rows = res.data.values || [];
+    const targetDateStr = toDateStr(targetDate);
+    const slotMap = {};
+
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      if (!row[3] || !row[4]) continue;
+      const rowDatetime = parseDatetime(row[3]);
+      if (!rowDatetime) continue;
+      if (toDateStr(rowDatetime) !== targetDateStr) continue;
+      const rowResult = (row[8] || '').trim();
+      if (!rowResult.startsWith('승인')) continue;
+      const h = rowDatetime.getHours();
+      slotMap[h] = (slotMap[h] || 0) + (parseInt(row[4]) || 0);
+    }
+
+    // 슬롯 현황 텍스트 생성
+    const MAX = 400000;
+    const BAR_LEN = 10;
+    let statusText = `*📊 ${dateStr} (${dayName}) 슬롯 현황*
+
+`;
+
+    const VALID_HOURS = Array.from({ length: 12 }, (_, i) => i + 8);
+    for (const h of VALID_HOURS) {
+      const used = slotMap[h] || 0;
+      const remaining = MAX - used;
+      const filled = Math.round((used / MAX) * BAR_LEN);
+      const bar = '█'.repeat(filled) + '░'.repeat(BAR_LEN - filled);
+      const usedStr = (used / 10000).toFixed(0) + '만';
+      const remainStr = remaining > 0 ? `${(remaining / 10000).toFixed(0)}만 가능` : '마감';
+      const emoji = remaining <= 0 ? '🔴' : remaining < 100000 ? '🟡' : '🟢';
+
+      // 수요일 블락 슬롯 표시
+      const isBlocked = targetDate.getDay() === 3 && WED_BLOCKED_HOURS.includes(h);
+      if (isBlocked) {
+        statusText += `⛔ *${String(h).padStart(2,'0')}시* ${bar} 발송 불가 (수요일)
+`;
+      } else {
+        statusText += `${emoji} *${String(h).padStart(2,'0')}시* ${bar} ${usedStr} / 40만 (${remainStr})
+`;
+      }
+    }
+
+    await client.chat.postMessage({
+      channel: command.user_id,
+      text: `📊 ${dateStr} 슬롯 현황`,
+      blocks: [{ type: 'section', text: { type: 'mrkdwn', text: statusText } }],
+    });
+  } catch (error) {
+    logger.error(error);
+    await client.chat.postMessage({
+      channel: command.user_id,
+      text: '❌ 현황 조회 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.',
+    });
+  }
+});
+
 // ── 서버 시작 ─────────────────────────────────────────────────────
 (async () => {
   await app.start(process.env.PORT || 3000);
