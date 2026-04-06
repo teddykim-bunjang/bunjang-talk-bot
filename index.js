@@ -71,13 +71,13 @@ function buildModal() {
         type: 'input',
         block_id: 'original_slots',
         label: { type: 'plain_text', text: '[일정 변경] 기존 시간대' },
-        hint: { type: 'plain_text', text: '일정 변경 시에만 입력 | 형식: HH:MM~HH:MM (여러 개면 줄바꿈)' },
+        hint: { type: 'plain_text', text: '일정 변경 시에만 입력 | 형식: HH:MM~HH:MM, 수량 (여러 개면 줄바꿈)' },
         optional: true,
         element: {
           type: 'plain_text_input',
           action_id: 'value',
           multiline: true,
-          placeholder: { type: 'plain_text', text: '14:00~15:00\n15:00~16:00' },
+          placeholder: { type: 'plain_text', text: '14:00~15:00, 300000\n15:00~16:00, 200000' },
         },
       },
       {
@@ -188,22 +188,30 @@ app.view('bt_modal', async ({ ack, body, view, client, logger }) => {
     return;
   }
 
-  // 일정 변경 시 기존 수량 불일치 체크
+  // 일정 변경 시 기존 시간대 파싱 및 수량 불일치 체크
   if (requestType === 'change') {
-    const originalDate = parseDateStr(sendDateStr);
     const originalDateParsed = parseDateStr(originalDateStr);
-    const countErrors = {};
+    const originalSlotErrors = {};
+    const originalSlotLines = originalSlotsRaw.split('\n').map(l => l.trim()).filter(l => l);
 
-    for (const slot of parsedSlots.slots) {
-      const registeredCount = await getRegisteredCount(originalDateParsed, slot.startHour, slot.startMin);
-      if (registeredCount !== null && registeredCount !== slot.count) {
-        countErrors.slots = `수량 불일치: ${slot.label} 슬롯의 기존 등록 수량은 ${registeredCount.toLocaleString()}건입니다. 수량을 변경하려면 담당자에게 문의해주세요.`;
+    for (const line of originalSlotLines) {
+      const m = line.match(/^(\d{1,2}):(\d{2})~(\d{1,2}):(\d{2})\s*[,\s]\s*([\d,]+)$/);
+      if (!m) {
+        originalSlotErrors.original_slots = `입력 형식 오류: "${line}"\n올바른 형식: 14:00~15:00, 300000`;
+        break;
+      }
+      const startHour = parseInt(m[1]);
+      const startMin = parseInt(m[2]);
+      const inputCount = parseInt(m[5].replace(/,/g, ''));
+      const registeredCount = await getRegisteredCount(originalDateParsed, startHour, startMin);
+      if (registeredCount !== null && registeredCount !== inputCount) {
+        originalSlotErrors.original_slots = `수량 불일치: ${String(startHour).padStart(2,'0')}:${String(startMin).padStart(2,'0')}~${m[3].padStart(2,'0')}:${m[4].padStart(2,'0')} 슬롯의 기존 등록 수량과 일치하지 않습니다.`;
         break;
       }
     }
 
-    if (Object.keys(countErrors).length > 0) {
-      await ack({ response_action: 'errors', errors: countErrors });
+    if (Object.keys(originalSlotErrors).length > 0) {
+      await ack({ response_action: 'errors', errors: originalSlotErrors });
       return;
     }
   }
@@ -427,9 +435,9 @@ app.action('change_approve', async ({ ack, body, action, client, logger }) => {
 
     for (const slot of slotResults) {
       if (slot.result === '승인 (변경)') {
-        // 승인된 슬롯만 원본 취소
+        // 승인된 슬롯만 원본 취소 (수량 포함 형식: HH:MM~HH:MM, 수량)
         for (const slotLine of originalSlotLines) {
-          const m = slotLine.match(/^(\d{1,2}):(\d{2})~(\d{1,2}):(\d{2})$/);
+          const m = slotLine.match(/^(\d{1,2}):(\d{2})~(\d{1,2}):(\d{2})\s*[,\s]\s*[\d,]+$/);
           if (m) await cancelSheetSlot(originalDate, parseInt(m[1]), parseInt(m[2]));
         }
       }
