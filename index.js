@@ -45,7 +45,7 @@ function buildModal() {
       {
         type: 'input',
         block_id: 'request_type',
-        label: { type: 'plain_text', text: '검토 요청 구분' },
+        label: { type: 'plain_text', text: '요청 유형' },
         element: {
           type: 'radio_buttons',
           action_id: 'value',
@@ -111,13 +111,13 @@ function buildModal() {
       {
         type: 'input',
         block_id: 'marketing_consent',
-        label: { type: 'plain_text', text: '마케팅 수신 대상 여부' },
+        label: { type: 'plain_text', text: '광고성 메시지 여부' },
         element: {
           type: 'radio_buttons',
           action_id: 'value',
           options: [
-            { text: { type: 'plain_text', text: 'O (수신 대상)' }, value: 'Y' },
-            { text: { type: 'plain_text', text: 'X (수신 대상 아님)' }, value: 'N' },
+            { text: { type: 'plain_text', text: 'O' }, value: 'Y' },
+            { text: { type: 'plain_text', text: 'X' }, value: 'N' },
           ],
         },
       },
@@ -125,7 +125,7 @@ function buildModal() {
         type: 'context',
         elements: [{
           type: 'mrkdwn',
-          text: '※ 광고성 메시지 발송일 경우 아래 항목을 반드시 포함해주세요.\n• 메시지 타이틀 내 `(광고)` 표기\n• 메시지 내용 내 `※ 수신거부:알림설정` 표기',
+          text: '※ 광고성 메시지 발송일 경우 아래 항목을 반드시 포함해 주세요.\n• 메시지 타이틀 내 `(광고)` 표기\n• 메시지 내용 내 `※ 수신거부:알림설정` 표기',
         }],
       },
     ],
@@ -599,13 +599,7 @@ async function sendManualReviewDM({ client, user, rowId, sendDateStr, manualSlot
           },
           {
             type: 'button', text: { type: 'plain_text', text: '❌ 반려' }, style: 'danger',
-            action_id: 'manual_reject', value: actionPayload,
-            confirm: {
-              title: { type: 'plain_text', text: '반려 확인' },
-              text: { type: 'mrkdwn', text: '이 요청을 반려하시겠습니까?' },
-              confirm: { type: 'plain_text', text: '반려' },
-              deny: { type: 'plain_text', text: '취소' },
-            },
+            action_id: 'manual_reject_open', value: actionPayload,
           },
         ],
       },
@@ -630,19 +624,59 @@ app.action('manual_approve', async ({ ack, body, action, client, logger }) => {
   } catch (error) { logger.error(error); }
 });
 
-// ── 신규 수동 반려 ────────────────────────────────────────────────
-app.action('manual_reject', async ({ ack, body, action, client, logger }) => {
+// ── 신규 수동 반려 버튼 → 사유 입력 모달 ───────────────────────
+app.action('manual_reject_open', async ({ ack, body, action, client, logger }) => {
   await ack();
   try {
-    const data = JSON.parse(action.value);
+    await client.views.open({
+      trigger_id: body.trigger_id,
+      view: {
+        type: 'modal',
+        callback_id: 'manual_reject_modal',
+        private_metadata: JSON.stringify({
+          payload: action.value,
+          channelId: body.channel.id,
+          messageTs: body.message.ts,
+        }),
+        title: { type: 'plain_text', text: '반려 사유 입력' },
+        submit: { type: 'plain_text', text: '반려 처리' },
+        close: { type: 'plain_text', text: '취소' },
+        blocks: [{
+          type: 'input',
+          block_id: 'reject_reason',
+          label: { type: 'plain_text', text: '반려 사유' },
+          element: {
+            type: 'plain_text_input',
+            action_id: 'value',
+            multiline: true,
+            placeholder: { type: 'plain_text', text: '반려 사유를 입력해주세요.' },
+          },
+        }],
+      },
+    });
+  } catch (error) { logger.error(error); }
+});
+
+// ── 신규 수동 반려 처리 ───────────────────────────────────────────
+app.view('manual_reject_modal', async ({ ack, body, view, client, logger }) => {
+  await ack();
+  try {
+    const meta = JSON.parse(view.private_metadata);
+    const data = JSON.parse(meta.payload);
+    const rejectReason = view.state.values.reject_reason.value.value.trim();
     const slotLabels = data.manualSlots.map(s => s.label).join(', ');
+
     for (const slot of data.manualSlots) {
-      await updateSheetResult(`${data.rowId}_${slot.startHour}_${slot.startMin}`, '반려 (수동)');
+      await updateSheetResult(`${data.rowId}_${slot.startHour}_${slot.startMin}`, `반려 (수동) - ${rejectReason}`);
     }
-    await client.chat.postMessage({ channel: data.userId, text: `❌ 번개톡 발송 요청이 반려되었습니다.\n발송 예정: ${data.sendDateStr} | ${slotLabels}\n담당자에게 문의해주세요.` });
+    await client.chat.postMessage({
+      channel: data.userId,
+      text: `❌ 번개톡 발송 요청이 반려되었습니다.`,
+      blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `*❌ 번개톡 발송 요청 반려*\n*발송 예정:* ${data.sendDateStr} | ${slotLabels}\n*반려 사유:* ${rejectReason}\n\n담당자에게 문의해주세요.` } }],
+    });
     await client.chat.update({
-      channel: body.channel.id, ts: body.message.ts, text: '❌ 반려 처리 완료',
-      blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `❌ *반려 처리 완료*\n요청자: <@${data.userId}> | ${data.sendDateStr} ${slotLabels}` } }],
+      channel: meta.channelId, ts: meta.messageTs, text: '❌ 반려 처리 완료',
+      blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `❌ *반려 처리 완료*\n요청자: <@${data.userId}> | ${data.sendDateStr} ${slotLabels}\n사유: ${rejectReason}` } }],
     });
   } catch (error) { logger.error(error); }
 });
