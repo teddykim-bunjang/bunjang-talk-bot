@@ -34,7 +34,20 @@ app.command('/bt', async ({ command, ack, client, logger }) => {
 });
 
 // ── 모달 빌더 ────────────────────────────────────────────────────
-function buildModal() {
+function buildModal(showOriginalDate = false) {
+  const originalDateBlock = {
+    type: 'input',
+    block_id: 'original_date',
+    label: { type: 'plain_text', text: '기존 발송 날짜' },
+    hint: { type: 'plain_text', text: '형식: YYYY-MM-DD' },
+    optional: true,
+    element: {
+      type: 'plain_text_input',
+      action_id: 'value',
+      placeholder: { type: 'plain_text', text: 'YYYY-MM-DD' },
+    },
+  };
+
   return {
     type: 'modal',
     callback_id: 'bt_modal',
@@ -48,25 +61,14 @@ function buildModal() {
         label: { type: 'plain_text', text: '요청 유형' },
         element: {
           type: 'radio_buttons',
-          action_id: 'value',
+          action_id: 'request_type_changed',
           options: [
             { text: { type: 'plain_text', text: '신규 등록' }, value: 'new' },
             { text: { type: 'plain_text', text: '일정 변경' }, value: 'change' },
           ],
         },
       },
-      {
-        type: 'input',
-        block_id: 'original_date',
-        label: { type: 'plain_text', text: '[일정 변경] 기존 발송 날짜' },
-        hint: { type: 'plain_text', text: '일정 변경 시에만 입력 | 형식: YYYY-MM-DD' },
-        optional: true,
-        element: {
-          type: 'plain_text_input',
-          action_id: 'value',
-          placeholder: { type: 'plain_text', text: 'YYYY-MM-DD' },
-        },
-      },
+      ...(showOriginalDate ? [originalDateBlock] : []),
       {
         type: 'input',
         block_id: 'send_date',
@@ -131,6 +133,21 @@ function buildModal() {
     ],
   };
 }
+
+// ── 요청 유형 변경 시 모달 업데이트 ────────────────────────────
+app.action('request_type_changed', async ({ ack, body, client, action, logger }) => {
+  await ack();
+  try {
+    const selectedValue = action.selected_option.value;
+    const showOriginalDate = selectedValue === 'change';
+    await client.views.update({
+      view_id: body.view.id,
+      view: buildModal(showOriginalDate),
+    });
+  } catch (error) {
+    logger.error(error);
+  }
+});
 
 // ── 모달 제출 처리 ────────────────────────────────────────────────
 app.view('bt_modal', async ({ ack, body, view, client, logger }) => {
