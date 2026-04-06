@@ -56,17 +56,21 @@ function buildModal(showOriginalDate = false) {
     close: { type: 'plain_text', text: '취소' },
     blocks: [
       {
-        type: 'input',
+        type: 'section',
+        block_id: 'request_type_section',
+        text: { type: 'mrkdwn', text: '*요청 유형*' },
+      },
+      {
+        type: 'actions',
         block_id: 'request_type',
-        label: { type: 'plain_text', text: '요청 유형' },
-        element: {
+        elements: [{
           type: 'radio_buttons',
           action_id: 'request_type_changed',
           options: [
             { text: { type: 'plain_text', text: '신규 등록' }, value: 'new' },
             { text: { type: 'plain_text', text: '일정 변경' }, value: 'change' },
           ],
-        },
+        }],
       },
       ...(showOriginalDate ? [originalDateBlock] : []),
       {
@@ -154,7 +158,7 @@ app.view('bt_modal', async ({ ack, body, view, client, logger }) => {
   const v = view.state.values;
   const user = body.user;
 
-  const requestType = v.request_type.value.selected_option.value;
+  const requestType = v.request_type?.request_type_changed?.selected_option?.value || 'new';
   const originalDateStr = v.original_date.value?.value?.trim() || '';
   const sendDateStr = v.send_date.value.value.trim();
   const slotsRaw = v.slots.value.value.trim();
