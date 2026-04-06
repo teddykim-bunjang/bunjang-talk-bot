@@ -288,7 +288,7 @@ async function handleNewRequest({ client, user, requestDatetime, sendDate, sendD
 async function handleChangeRequest({ client, user, requestDatetime, originalDateStr, originalSlotsRaw, sendDateStr, slots, title, bodyText, marketingConsent }) {
   const rowId = `change_${Date.now()}`;
 
-  // 변경 건도 시트에 기록 (수동확인 대기 상태)
+  // 변경 요청 시트 기록 (수동확인 대기)
   for (const slot of slots) {
     await writeToSheet({
       rowId: `${rowId}_${slot.startHour}_${slot.startMin}`,
@@ -383,10 +383,9 @@ app.action('change_approve', async ({ ack, body, action, client, logger }) => {
       }
     }
 
-    // 신규 슬롯 검증 및 시트 등록
+    // 신규 슬롯 검증 및 change_ 행 업데이트 (새 행 추가 없음)
     const sendDate = parseDateStr(data.sendDateStr);
     const dayOfWeek = sendDate.getDay();
-    const rowId = `approved_${Date.now()}`;
     const slotResults = [];
     let hasReject = false;
 
@@ -406,25 +405,13 @@ app.action('change_approve', async ({ ack, body, action, client, logger }) => {
         if (!data.bodyText.includes('수신거부') || !data.bodyText.includes('알림설정')) slotRejects.push('본문에 "수신거부:알림설정" 미포함');
       }
 
-      const slotResult = slotRejects.length > 0 ? `반려 (${slotRejects.join(' / ')})` : '승인';
+      const slotResult = slotRejects.length > 0 ? `반려 (${slotRejects.join(' / ')})` : '승인 (변경)';
       if (slotRejects.length > 0) hasReject = true;
 
       slotResults.push({ label, count, result: slotResult, rejects: slotRejects });
 
-      await writeToSheet({
-        rowId: `${rowId}_${startHour}_${startMin}`,
-        requestDatetime: formatDatetime(new Date()),
-        requester: data.userName,
-        sendDatetime: `${data.sendDateStr} ${String(startHour).padStart(2,'0')}:${String(startMin).padStart(2,'0')}`,
-        sendCount: count, title: data.title, body: data.bodyText,
-        marketingConsent: data.marketingConsent,
-        result: slotResult,
-      });
-    }
-
-    // 기존 변경 요청 건 시트 결과 업데이트
-    for (const slot of data.slots) {
-      await updateSheetResult(`${data.rowId}_${slot.startHour}_${slot.startMin}`, '승인 처리됨 (변경)');
+      // change_ 행 결과 업데이트 (새 행 추가 없음)
+      await updateSheetResult(`${data.rowId}_${startHour}_${startMin}`, slotResult);
     }
 
     // 요청자 결과 DM
