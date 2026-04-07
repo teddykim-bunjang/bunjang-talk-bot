@@ -87,31 +87,31 @@ function buildModal(showOriginalDate = false) {
       {
         type: 'input',
         block_id: 'slots',
-        label: { type: 'plain_text', text: '시간대 입력' },
+        label: { type: 'plain_text', text: '발송 예정 시간/수량' },
         element: {
           type: 'plain_text_input',
           action_id: 'value',
           multiline: true,
-          placeholder: { type: 'plain_text', text: '14:00~15:00, 400000' },
+          placeholder: { type: 'plain_text', text: '14:00, 400000' },
         },
       },
       {
         type: 'context',
         elements: [{
           type: 'mrkdwn',
-          text: '*신규 등록 시*\n형식: `HH:MM~HH:MM, 수량`\n예) `14:00~15:00, 400000`\n\n*일정 변경 시* (기존 → 변경)\n형식: `HH:MM~HH:MM, 수량 → HH:MM~HH:MM, 수량`\n예) `14:00~15:00, 300000 → 15:00~16:00, 300000`\n구분자는 `→`, `->`, `>` 모두 사용 가능',
+          text: '※ 발송 시간과 해당 시점에 발송할 수량을 함께 기입해 주세요.\n※ 요청 유형에 따라 입력 형태가 다르니, 참고해 주세요.\n• 신규 등록 시, [발송 시간, 수량] / ex. `14:00~15:00, 400000`\n• 일정 변경 시, [기존 발송 시간, 수량 → 변경 발송 시간, 수량] / ex. `14:00~15:00, 300000 → 15:00~16:00, 300000`\n• 일정 변경에 사용되는 구분자: `→` / `->` / `>`',
         }],
       },
       {
         type: 'input',
         block_id: 'title',
-        label: { type: 'plain_text', text: '제목' },
+        label: { type: 'plain_text', text: '발송할 번개톡 제목' },
         element: { type: 'plain_text_input', action_id: 'value' },
       },
       {
         type: 'input',
         block_id: 'body',
-        label: { type: 'plain_text', text: '본문' },
+        label: { type: 'plain_text', text: '발송할 번개톡 내용' },
         element: { type: 'plain_text_input', action_id: 'value', multiline: true },
       },
       {
@@ -291,7 +291,7 @@ async function handleNewRequest({ client, user, requestDatetime, sendDate, sendD
   // 요청자 DM
   const overallEmoji = hasReject ? '❌' : hasManualReview ? '⏳' : '✅';
   const overallLabel = hasReject ? '일부 반려 포함' : hasManualReview ? '일부 수동확인 대기' : '전체 승인';
-  let resultText = `*${overallEmoji} 번개톡 발송 검토 결과*\n\n*발송 예정 날짜:* ${sendDateStr}\n*마수신 동의:* ${marketingConsent}\n\n*시간대별 결과:*\n`;
+  let resultText = `*${overallEmoji} 번개톡 발송 검토 결과*\n\n*발송 예정 날짜:* ${sendDateStr}\n*광고성 메시지 여부:* ${marketingConsent}\n*발송할 번개톡 제목:* ${title}\n*발송할 번개톡 내용:*\n${bodyText}\n\n*발송 예정 시간별 결과:*\n`;
   for (const slot of slotResults) {
     const e = slot.result === '승인' ? '✅' : slot.result === '수동확인 대기' ? '⏳' : '❌';
     resultText += `${e} *${slot.label}* | ${slot.count.toLocaleString()}건 | ${slot.result}\n`;
@@ -363,7 +363,7 @@ async function handleChangeRequest({ client, user, requestDatetime, originalDate
           `*슬롯 매핑:*\n${mappingSummary}`,
           `*제목:* ${title}`,
           `*본문:* ${bodyText.substring(0, 100)}${bodyText.length > 100 ? '...' : ''}`,
-          `*마수신 동의:* ${marketingConsent}`,
+          `*광고성 메시지 여부:* ${marketingConsent}`,
         ].join('\n'),
       },
     },
@@ -606,7 +606,7 @@ async function sendManualReviewDM({ client, user, rowId, sendDateStr, manualSlot
             `*수동확인 슬롯:*\n${manualDetail}`,
             `*제목:* ${title}`,
             `*본문:* ${bodyText.substring(0, 100)}${bodyText.length > 100 ? '...' : ''}`,
-            `*마수신 동의:* ${marketingConsent}`,
+            `*광고성 메시지 여부:* ${marketingConsent}`,
           ].join('\n'),
         },
       },
@@ -736,49 +736,44 @@ function parseSlots(raw) {
 }
 
 // ── 슬롯 매핑 파싱 (일정 변경용) ───────────────────────────────
-// 형식: HH:MM~HH:MM, 수량 → HH:MM~HH:MM, 수량 (→, ->, > 모두 허용)
+// 형식: HH:MM, 수량 → HH:MM, 수량 (→, ->, > 모두 허용)
 function parseSlotMappings(raw) {
   const lines = raw.split('\n').map(l => l.trim()).filter(l => l.length > 0);
   if (lines.length === 0) return { error: '시간대 매핑을 1개 이상 입력해주세요.' };
 
   const mappings = [];
-  const slotPattern = /^(\d{1,2}):(\d{2})~(\d{1,2}):(\d{2})\s*[,\s]\s*([\d,]+)$/;
+  const slotPattern = /^(\d{1,2}):(\d{2})\s*[,\s]\s*([\d,]+)$/;
 
   for (const line of lines) {
     const parts = line.split(/\s*(→|->|>)\s*/);
     if (parts.length < 3) {
-      return { error: `구분자(→, ->, >) 없음: "${line}"\n예) 14:00~15:00, 300000 → 15:00~16:00, 300000` };
+      return { error: `구분자(→, ->, >) 없음: "${line}"\n예) 14:00, 300000 → 15:00, 300000` };
     }
 
     const oldPart = parts[0].trim();
     const newPart = parts[parts.length - 1].trim();
 
     const oldMatch = oldPart.match(slotPattern);
-    if (!oldMatch) return { error: `기존 슬롯 형식 오류: "${oldPart}"\n올바른 형식: 14:00~15:00, 300000` };
+    if (!oldMatch) return { error: `기존 슬롯 형식 오류: "${oldPart}"\n올바른 형식: 14:00, 300000` };
 
     const newMatch = newPart.match(slotPattern);
-    if (!newMatch) return { error: `변경 슬롯 형식 오류: "${newPart}"\n올바른 형식: 14:00~15:00, 300000` };
+    if (!newMatch) return { error: `변경 슬롯 형식 오류: "${newPart}"\n올바른 형식: 14:00, 300000` };
 
-    // 1시간 범위 체크
-    const oldStart = parseInt(oldMatch[1]) * 60 + parseInt(oldMatch[2]);
-    const oldEnd = parseInt(oldMatch[3]) * 60 + parseInt(oldMatch[4]);
-    if (oldEnd - oldStart !== 60) return { error: `기존 슬롯 범위는 정확히 1시간이어야 합니다: "${oldPart}"` };
-
-    const newStart = parseInt(newMatch[1]) * 60 + parseInt(newMatch[2]);
-    const newEnd = parseInt(newMatch[3]) * 60 + parseInt(newMatch[4]);
-    if (newEnd - newStart !== 60) return { error: `변경 슬롯 범위는 정확히 1시간이어야 합니다: "${newPart}"` };
-
-    // 수량 유효성 체크
-    const oldCount = parseInt(oldMatch[5].replace(/,/g, ''));
-    const newCount = parseInt(newMatch[5].replace(/,/g, ''));
+    const oldCount = parseInt(oldMatch[3].replace(/,/g, ''));
+    const newCount = parseInt(newMatch[3].replace(/,/g, ''));
     if (isNaN(oldCount) || oldCount <= 0) return { error: `기존 슬롯 수량 오류: "${oldPart}"` };
     if (isNaN(newCount) || newCount <= 0) return { error: `변경 슬롯 수량 오류: "${newPart}"` };
 
-    const makeLabel = (m) => `${String(parseInt(m[1])).padStart(2,'0')}:${m[2]}~${String(parseInt(m[3])).padStart(2,'0')}:${m[4]}`;
+    const makeLabel = (h, m) => {
+      const endTotal = parseInt(h) * 60 + parseInt(m) + 60;
+      const endH = Math.floor(endTotal / 60);
+      const endM = endTotal % 60;
+      return `${String(parseInt(h)).padStart(2,'0')}:${m}~${String(endH).padStart(2,'0')}:${String(endM).padStart(2,'0')}`;
+    };
 
     mappings.push({
-      oldSlot: { label: makeLabel(oldMatch), startHour: parseInt(oldMatch[1]), startMin: parseInt(oldMatch[2]), count: oldCount },
-      newSlot: { label: makeLabel(newMatch), startHour: parseInt(newMatch[1]), startMin: parseInt(newMatch[2]), count: newCount },
+      oldSlot: { label: makeLabel(oldMatch[1], oldMatch[2]), startHour: parseInt(oldMatch[1]), startMin: parseInt(oldMatch[2]), count: oldCount },
+      newSlot: { label: makeLabel(newMatch[1], newMatch[2]), startHour: parseInt(newMatch[1]), startMin: parseInt(newMatch[2]), count: newCount },
     });
   }
   return { mappings };
@@ -909,7 +904,7 @@ function formatDatetime(date) {
 }
 
 // ── /bt-status 커맨드 → 날짜별 슬롯 현황 ──────────────────────
-app.command('/bt-status', async ({ command, ack, client, logger }) => {
+app.command('/bt-slot', async ({ command, ack, client, logger }) => {
   await ack();
   try {
     const dateStr = command.text.trim();
@@ -1008,7 +1003,7 @@ function buildChangeHeaderBlocks(data) {
           `*슬롯 매핑:*\n${mappingSummary}`,
           `*제목:* ${data.title}`,
           `*본문:* ${data.bodyText.substring(0, 100)}${data.bodyText.length > 100 ? '...' : ''}`,
-          `*마수신 동의:* ${data.marketingConsent}`,
+          `*광고성 메시지 여부:* ${data.marketingConsent}`,
         ].join('\n'),
       },
     },
@@ -1034,7 +1029,7 @@ function buildChangeHeaderBlocks(data) {
           `*슬롯 매핑:*\n${mappingSummary}`,
           `*제목:* ${data.title}`,
           `*본문:* ${data.bodyText.substring(0, 100)}${data.bodyText.length > 100 ? '...' : ''}`,
-          `*마수신 동의:* ${data.marketingConsent}`,
+          `*광고성 메시지 여부:* ${data.marketingConsent}`,
         ].join('\n'),
       },
     },
