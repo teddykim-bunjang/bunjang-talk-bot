@@ -709,25 +709,20 @@ function parseSlots(raw) {
 
   const slots = [];
   for (const line of lines) {
-    const match = line.match(/^(\d{1,2}):(\d{2})~(\d{1,2}):(\d{2})\s*[,\s]\s*([\d,]+)$/);
-    if (!match) return { error: `입력 형식 오류: "${line}"\n올바른 형식: 14:00~15:00, 400000` };
+    const match = line.match(/^(\d{1,2}):(\d{2})\s*[,\s]\s*([\d,]+)$/);
+    if (!match) return { error: `입력 형식 오류: "${line}"\n올바른 형식: 14:00, 400000` };
 
     const startHour = parseInt(match[1]);
     const startMin = parseInt(match[2]);
-    const endHour = parseInt(match[3]);
-    const endMin = parseInt(match[4]);
-    const countRaw = match[5].replace(/,/g, '');
-    const count = parseInt(countRaw);
+    const count = parseInt(match[3].replace(/,/g, ''));
     if (isNaN(count) || count <= 0) {
-      return { error: `수량이 올바르지 않습니다: "${line}"
-0보다 큰 숫자를 입력해주세요.` };
+      return { error: `수량이 올바르지 않습니다: "${line}"\n0보다 큰 숫자를 입력해주세요.` };
     }
 
-    const startTotal = startHour * 60 + startMin;
-    const endTotal = endHour * 60 + endMin;
-    if (endTotal - startTotal !== 60) {
-      return { error: `발송 범위는 정확히 1시간이어야 합니다: "${line}"\n예) 14:00~15:00, 14:30~15:30` };
-    }
+    // 종료 시간 자동 계산 (시작 + 1시간)
+    const endTotal = startHour * 60 + startMin + 60;
+    const endHour = Math.floor(endTotal / 60);
+    const endMin = endTotal % 60;
 
     const label = `${String(startHour).padStart(2,'0')}:${String(startMin).padStart(2,'0')}~${String(endHour).padStart(2,'0')}:${String(endMin).padStart(2,'0')}`;
     slots.push({ startHour, startMin, endHour, endMin, count, label });
